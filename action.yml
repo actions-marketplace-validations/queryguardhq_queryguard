@@ -1,0 +1,45 @@
+name: 'QueryGuard'
+description: 'Pre-merge database query plan and blast-radius analyzer for PostgreSQL'
+inputs:
+  schema-path:
+    description: 'Path to schema DDL file'
+    required: true
+    default: 'test/schema.sql'
+  queries-path:
+    description: 'Path to SQL queries file to evaluate'
+    required: true
+    default: 'test/queries.sql'
+  pg-host:
+    description: 'PostgreSQL host'
+    required: false
+    default: 'localhost'
+  pg-port:
+    description: 'PostgreSQL port'
+    required: false
+    default: '5432'
+  pg-user:
+    description: 'PostgreSQL user'
+    required: false
+    default: 'postgres'
+  pg-password:
+    description: 'PostgreSQL password'
+    required: false
+    default: 'postgres'
+  pg-database:
+    description: 'PostgreSQL database name'
+    required: false
+    default: 'postgres'
+  mock-rows:
+    description: 'Simulated row count for catalog optimizer mocking'
+    required: false
+    default: '500000'
+  fail-on-sev1:
+    description: 'Fail CI if a critical sequential scan is detected'
+    required: false
+    default: 'false'
+  github-token:
+    description: 'GITHUB_TOKEN for PR commenting'
+    required: false
+runs:
+  using: 'node20'
+  main: 'dist/index.js'
