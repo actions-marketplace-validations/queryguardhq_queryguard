@@ -24,7 +24,7 @@ function resolveConfig(): Config {
     pgUser: process.env.PG_USER || getParam('--user', 'pg-user', 'postgres'),
     pgPass: process.env.PG_PASSWORD || getParam('--password', 'pg-password', 'postgres'),
     pgDb: process.env.PG_DATABASE || getParam('--database', 'pg-database', 'postgres'),
-    mockRows: parseInt(process.env.MOCK_ROWS || getParam('--mock-rows', 'mock-rows', '500000'), 10),
+    mockRows: parseInt(process.env.MOCK_ROWS || getParam('--mock-rows', 'mock-rows', '2000'), 10),
     failOnSev1: (process.env.FAIL_ON_SEV1 || getParam('--fail-on-sev1', 'fail-on-sev1', 'false')) === 'true',
     githubToken: process.env.GITHUB_TOKEN || getParam('--token', 'github-token', ''),
   };
@@ -32,9 +32,7 @@ function resolveConfig(): Config {
 
 function extractColumn(filterClause?: string): string | null {
   if (!filterClause) return null;
-  // Strip PostgreSQL type-casts like "::text" or "::character varying"
   const cleanFilter = filterClause.replace(/::[a-zA-Z0-9_ ]+/g, '');
-  // Extract column name on left-hand side of operator
   const match = cleanFilter.match(/\(?([a-zA-Z_0-9]+)\)?\s*(=|>|<|>=|<=|~~|LIKE|IN)/i);
   return match ? match[1] : null;
 }
@@ -70,7 +68,7 @@ function analyzeDDLLocks(statements: string[]): Finding[] {
         isLockRisk: true,
         lockType: 'SHARE',
         targetTable: tableName,
-        recommendation: `Use \`CREATE INDEX CONCURRENTLY ${indexName} ON ${tableName} ...\` to prevent blocking writes.`,
+        recommendation: `Use \`CREATE INDEX CONCURRENTLY ${indexName} ON${tableName} ...\` to prevent blocking writes.`,
       });
     }
 
@@ -95,6 +93,72 @@ function analyzeDDLLocks(statements: string[]): Finding[] {
   return findings;
 }
 
+async function scaffoldSyntheticData(client: Client, sampleCount: number) {
+  console.log(`[QueryGuard] Auto-scaffolding zero-PII synthetic rows (${sampleCount} rows/table)...`);
+
+  // Bypass foreign key triggers during synthetic scaffolding
+  await client.query(`SET session_replication_role = 'replica';`);
+
+  try {
+    const tablesRes = await client.query(`
+      SELECT table_name 
+      FROM information_schema.tables 
+      WHERE table_schema = 'public' AND table_type = 'BASE TABLE';
+    `);
+
+    for (const row of tablesRes.rows) {
+      const table = row.table_name;
+      const colsRes = await client.query(`
+        SELECT column_name, data_type, column_default, is_nullable
+        FROM information_schema.columns 
+        WHERE table_schema = 'public' 
+          AND table_name = $1
+          AND (column_default IS NULL OR column_default NOT LIKE 'nextval%');
+      `, [table]);
+
+      if (colsRes.rows.length === 0) continue;
+
+      const colNames: string[] = [];
+      const valGenerators: string[] = [];
+
+      for (const col of colsRes.rows) {
+        colNames.push(`"${col.column_name}"`);
+        const dt = col.data_type.toLowerCase();
+
+        if (dt.includes('int')) {
+          // Use 1-indexed values so FK lookups match default primary keys
+          valGenerators.push(`((i % 100) + 1)`);
+        } else if (dt.includes('char') || dt.includes('text')) {
+          valGenerators.push(`'sample_' || i || CASE WHEN i % 100 = 0 THEN 'pending' ELSE 'active' END`);
+        } else if (dt.includes('timestamp') || dt.includes('date')) {
+          valGenerators.push(`CURRENT_TIMESTAMP - (i || ' minutes')::interval`);
+        } else if (dt.includes('bool')) {
+          valGenerators.push(`(i % 2 = 0)`);
+        } else {
+          valGenerators.push(`NULL`);
+        }
+      }
+
+      const insertSql = `
+        INSERT INTO "${table}" (${colNames.join(', ')})
+        SELECT ${valGenerators.join(', ')}
+        FROM generate_series(1, ${sampleCount}) i;
+      `;
+
+      try {
+        await client.query(insertSql);
+        await client.query(`ANALYZE "${table}";`);
+        console.log(`[QueryGuard] Injected and analyzed ${sampleCount} rows for table '${table}'.`);
+      } catch (err: any) {
+        console.warn(`[QueryGuard] Warning: Failed auto-scaffolding '${table}': ${err.message}`);
+      }
+    }
+  } finally {
+    // Restore default trigger execution
+    await client.query(`SET session_replication_role = 'origin';`);
+  }
+}
+
 async function upsertGithubComment(token: string, report: string) {
   const eventPath = process.env.GITHUB_EVENT_PATH;
   if (!eventPath || !fs.existsSync(eventPath)) {
@@ -107,7 +171,7 @@ async function upsertGithubComment(token: string, report: string) {
   const repository = process.env.GITHUB_REPOSITORY;
 
   if (!prNumber || !repository) {
-    console.log(`[QueryGuard] Non-PR context (PR: ${prNumber}, Repo:${repository}); skipping comment.`);
+    console.log(`[QueryGuard] Non-PR context (PR: ${prNumber}, Repo: ${repository}); skipping comment.`);
     return;
   }
 
@@ -186,7 +250,7 @@ async function run() {
     const lockFindings = analyzeDDLLocks(ddlStatements);
     console.log(`[QueryGuard] Detected ${lockFindings.length} migration lock hazard(s).`);
 
-    // 2. Apply Schema DDL Statement-by-Statement (Allows CONCURRENTLY execution)
+    // 2. Apply Schema DDL
     for (const stmt of ddlStatements) {
       try {
         await client.query(stmt);
@@ -195,7 +259,10 @@ async function run() {
       }
     }
 
-    // 3. Evaluate SQL Query Plans
+    // 3. Auto-Scaffold Zero-PII Synthetic Data for Cardinality Estimation
+    await scaffoldSyntheticData(client, config.mockRows);
+
+    // 4. Evaluate SQL Query Plans
     const resolvedQueries = path.resolve(config.queriesPath);
     console.log(`[QueryGuard] Evaluating queries: ${resolvedQueries}`);
     const queryStatements = splitSqlStatements(fs.readFileSync(resolvedQueries, 'utf8'));
@@ -210,7 +277,7 @@ async function run() {
         const seqScanNodes: PlanNode[] = [];
 
         function walkPlan(node: PlanNode) {
-          if (node['Node Type'] === 'Seq Scan' && (node['Filter'] || node['Plan Rows'] > 1000)) {
+          if (node['Node Type'] === 'Seq Scan' && (node['Filter'] || node['Plan Rows'] > 100)) {
             seqScanNodes.push(node);
           }
           if (node.Plans) {
@@ -232,7 +299,7 @@ async function run() {
             const col = extractColumn(node['Filter']);
             const indexSql = col 
               ? `CREATE INDEX CONCURRENTLY idx_${table}_${col} ON ${table}(${col});`
-              : `CREATE INDEX CONCURRENTLY idx_${table}_scan ON${table}(/* columns */);`;
+              : `CREATE INDEX CONCURRENTLY idx_${table}_scan ON ${table}(/* columns */);`;
 
             scanFindings.push({
               query: sql,
