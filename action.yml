@@ -1,8 +1,13 @@
 name: 'QueryGuard'
-description: 'Pre-merge database query plan and blast-radius analyzer for PostgreSQL'
+author: 'Munir Pathak'
+description: 'Pre-merge PostgreSQL blast-radius and migration lock analyzer.'
+branding:
+  icon: 'shield'
+  color: 'blue'
+
 inputs:
   schema-path:
-    description: 'Path to schema DDL file'
+    description: 'Path to schema DDL file or migration directory'
     required: true
     default: 'test/schema.sql'
   queries-path:
@@ -32,14 +37,16 @@ inputs:
   mock-rows:
     description: 'Simulated row count for catalog optimizer mocking'
     required: false
-    default: '500000'
+    default: '2000'
   fail-on-sev1:
-    description: 'Fail CI if a critical sequential scan is detected'
+    description: 'Block merge if a critical sequential scan or lock is detected'
     required: false
     default: 'false'
   github-token:
     description: 'GITHUB_TOKEN for PR commenting'
     required: false
+    default: ''
+
 runs:
   using: 'node24'
   main: 'dist/index.js'
