@@ -37,6 +37,7 @@ const pg_1 = require("pg");
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 const reporter_1 = require("./reporter");
+const BOT_MARKER = '<!-- queryguard:blast-radius-report -->';
 function getParam(flag, actionInputKey, fallback) {
     const idx = process.argv.indexOf(flag);
     if (idx !== -1 && process.argv[idx + 1]) {
@@ -62,9 +63,119 @@ function resolveConfig() {
 function extractColumn(filterClause) {
     if (!filterClause)
         return null;
-    // Matches patterns like "(organization_id = 42)" or "(created_at > ...)"
-    const match = filterClause.match(/\(?([a-zA-Z_0-9]+)\s*(=|>|<|>=|<=|~~|LIKE|IN)/i);
+    // Strip PostgreSQL type-casts like "::text" or "::character varying"
+    const cleanFilter = filterClause.replace(/::[a-zA-Z0-9_ ]+/g, '');
+    // Extract column name on left-hand side of operator
+    const match = cleanFilter.match(/\(?([a-zA-Z_0-9]+)\)?\s*(=|>|<|>=|<=|~~|LIKE|IN)/i);
     return match ? match[1] : null;
+}
+function splitSqlStatements(sqlContent) {
+    const sanitized = sqlContent
+        .split('\n')
+        .filter(line => !line.trim().startsWith('--'))
+        .join('\n');
+    return sanitized
+        .split(';')
+        .map(s => s.trim())
+        .filter(s => s.length > 0);
+}
+function analyzeDDLLocks(statements) {
+    const findings = [];
+    for (const stmt of statements) {
+        const isCreateIndex = /^\s*CREATE\s+(UNIQUE\s+)?INDEX/i.test(stmt);
+        const hasConcurrently = /\bCONCURRENTLY\b/i.test(stmt);
+        if (isCreateIndex && !hasConcurrently) {
+            const match = stmt.match(/CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-zA-Z0-9_]+)\s+ON\s+(?:ONLY\s+)?([a-zA-Z0-9_]+)/i);
+            const indexName = match ? match[1] : 'idx_name';
+            const tableName = match ? match[2] : 'target_table';
+            findings.push({
+                query: stmt,
+                totalCost: 0,
+                hasSeqScan: false,
+                isLockRisk: true,
+                lockType: 'SHARE',
+                targetTable: tableName,
+                recommendation: `Use \`CREATE INDEX CONCURRENTLY ${indexName} ON ${tableName} ...\` to prevent blocking writes.`,
+            });
+        }
+        const isAlterColumnType = /ALTER\s+TABLE\s+([a-zA-Z0-9_]+)\s+ALTER\s+COLUMN\s+([a-zA-Z0-9_]+)\s+(?:SET\s+DATA\s+)?TYPE/i.test(stmt);
+        if (isAlterColumnType) {
+            const match = stmt.match(/ALTER\s+TABLE\s+([a-zA-Z0-9_]+)\s+ALTER\s+COLUMN\s+([a-zA-Z0-9_]+)/i);
+            const tableName = match ? match[1] : 'target_table';
+            const columnName = match ? match[2] : 'col_name';
+            findings.push({
+                query: stmt,
+                totalCost: 0,
+                hasSeqScan: false,
+                isLockRisk: true,
+                lockType: 'ACCESS EXCLUSIVE',
+                targetTable: tableName,
+                recommendation: `Altering \`${tableName}.${columnName}\` type rewrites table and blocks all reads/writes.`,
+            });
+        }
+    }
+    return findings;
+}
+async function upsertGithubComment(token, report) {
+    const eventPath = process.env.GITHUB_EVENT_PATH;
+    if (!eventPath || !fs.existsSync(eventPath)) {
+        console.log('[QueryGuard] GITHUB_EVENT_PATH missing; skipping comment.');
+        return;
+    }
+    const eventData = JSON.parse(fs.readFileSync(eventPath, 'utf8'));
+    const prNumber = eventData.pull_request?.number;
+    const repository = process.env.GITHUB_REPOSITORY;
+    if (!prNumber || !repository) {
+        console.log(`[QueryGuard] Non-PR context (PR: ${prNumber}, Repo:${repository}); skipping comment.`);
+        return;
+    }
+    const commentsUrl = `https://api.github.com/repos/${repository}/issues/${prNumber}/comments`;
+    const bodyWithMarker = `${BOT_MARKER}\n${report}`;
+    const headers = {
+        'Authorization': `Bearer ${token}`,
+        'Accept': 'application/vnd.github.v3+json',
+        'Content-Type': 'application/json',
+        'User-Agent': 'QueryGuard-CI',
+    };
+    try {
+        const listRes = await fetch(commentsUrl, { headers });
+        let existingComment = null;
+        if (listRes.ok) {
+            const comments = await listRes.json();
+            existingComment = Array.isArray(comments)
+                ? comments.find((c) => c.body && c.body.includes(BOT_MARKER))
+                : null;
+        }
+        if (existingComment) {
+            console.log(`[QueryGuard] Updating report comment (ID: ${existingComment.id}) in place...`);
+            const updateUrl = `https://api.github.com/repos/${repository}/issues/comments/${existingComment.id}`;
+            const patchRes = await fetch(updateUrl, {
+                method: 'PATCH',
+                headers,
+                body: JSON.stringify({ body: bodyWithMarker }),
+            });
+            if (patchRes.ok) {
+                console.log('[QueryGuard] PR comment successfully updated in place.');
+                return;
+            }
+            console.warn(`[QueryGuard] PATCH failed (${patchRes.status}). Falling back to POST...`);
+        }
+        const postRes = await fetch(commentsUrl, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ body: bodyWithMarker }),
+        });
+        if (postRes.ok) {
+            console.log('[QueryGuard] Successfully posted comment.');
+        }
+        else {
+            const err = await postRes.text();
+            console.error(`[QueryGuard] Failed posting comment: ${err}`);
+        }
+    }
+    catch (err) {
+        console.error(`[QueryGuard] API error during comment upsert: ${err.message}`);
+    }
 }
 async function run() {
     const config = resolveConfig();
@@ -75,20 +186,30 @@ async function run() {
         password: config.pgPass,
         database: config.pgDb,
     });
-    console.log(`[QueryGuard] Connecting to ${config.pgHost}:${config.pgPort}/${config.pgDb}...`);
+    console.log(`[QueryGuard] Connecting to database at ${config.pgHost}:${config.pgPort}/${config.pgDb}...`);
     await client.connect();
     try {
         const resolvedSchema = path.resolve(config.schemaPath);
-        console.log(`[QueryGuard] Applying schema: ${resolvedSchema}`);
-        const ddl = fs.readFileSync(resolvedSchema, 'utf8');
-        await client.query(ddl);
+        console.log(`[QueryGuard] Inspecting schema DDL: ${resolvedSchema}`);
+        const ddlRaw = fs.readFileSync(resolvedSchema, 'utf8');
+        const ddlStatements = splitSqlStatements(ddlRaw);
+        // 1. Analyze Migration DDL Locks
+        const lockFindings = analyzeDDLLocks(ddlStatements);
+        console.log(`[QueryGuard] Detected ${lockFindings.length} migration lock hazard(s).`);
+        // 2. Apply Schema DDL Statement-by-Statement (Allows CONCURRENTLY execution)
+        for (const stmt of ddlStatements) {
+            try {
+                await client.query(stmt);
+            }
+            catch (err) {
+                console.warn(`[QueryGuard] Warning: Failed applying DDL statement: "${stmt.substring(0, 40)}..." -> ${err.message}`);
+            }
+        }
+        // 3. Evaluate SQL Query Plans
         const resolvedQueries = path.resolve(config.queriesPath);
         console.log(`[QueryGuard] Evaluating queries: ${resolvedQueries}`);
-        const queryStatements = fs.readFileSync(resolvedQueries, 'utf8')
-            .split(';')
-            .map(q => q.trim())
-            .filter(q => q.length > 0 && !q.startsWith('--'));
-        const findings = [];
+        const queryStatements = splitSqlStatements(fs.readFileSync(resolvedQueries, 'utf8'));
+        const scanFindings = [];
         for (const sql of queryStatements) {
             try {
                 const res = await client.query(`EXPLAIN (FORMAT JSON) ${sql}`);
@@ -104,7 +225,7 @@ async function run() {
                 }
                 walkPlan(plan.Plan);
                 if (seqScanNodes.length === 0) {
-                    findings.push({
+                    scanFindings.push({
                         query: sql,
                         totalCost: plan.Plan['Total Cost'],
                         hasSeqScan: false,
@@ -117,7 +238,7 @@ async function run() {
                         const indexSql = col
                             ? `CREATE INDEX CONCURRENTLY idx_${table}_${col} ON ${table}(${col});`
                             : `CREATE INDEX CONCURRENTLY idx_${table}_scan ON${table}(/* columns */);`;
-                        findings.push({
+                        scanFindings.push({
                             query: sql,
                             totalCost: plan.Plan['Total Cost'],
                             hasSeqScan: true,
@@ -133,12 +254,16 @@ async function run() {
                 console.warn(`[QueryGuard] Warning: Query execution error on "${sql}": ${err.message}`);
             }
         }
-        const reportMarkdown = (0, reporter_1.buildMarkdownReport)(findings);
+        const allFindings = [...lockFindings, ...scanFindings];
+        const reportMarkdown = (0, reporter_1.buildMarkdownReport)(allFindings);
         fs.writeFileSync('queryguard-report.md', reportMarkdown);
         console.log('\n' + reportMarkdown);
-        const severeCount = findings.filter(f => f.hasSeqScan).length;
-        if (severeCount > 0 && config.failOnSev1) {
-            console.error(`\n[QueryGuard] Blocked: Found ${severeCount} unindexed query patterns.`);
+        if (config.githubToken) {
+            await upsertGithubComment(config.githubToken, reportMarkdown);
+        }
+        const criticalIssues = allFindings.filter(f => f.hasSeqScan || f.isLockRisk);
+        if (criticalIssues.length > 0 && config.failOnSev1) {
+            console.error(`\n[QueryGuard] CI GATING FAILURE: Detected ${criticalIssues.length} critical database risk(s).`);
             process.exit(1);
         }
     }

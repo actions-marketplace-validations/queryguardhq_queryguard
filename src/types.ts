@@ -15,6 +15,8 @@ export interface Finding {
   query: string;
   totalCost: number;
   hasSeqScan: boolean;
+  isLockRisk?: boolean;
+  lockType?: string;
   targetTable?: string;
   impactedRows?: number;
   filterClause?: string;

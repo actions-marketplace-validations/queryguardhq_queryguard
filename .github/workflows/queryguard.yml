@@ -2,10 +2,11 @@ name: QueryGuard PR Sentinel
 
 on:
   pull_request:
-    paths:
-      - 'test/**'
-      - 'src/**'
-      - '**/*.sql'
+
+permissions:
+  pull-requests: write
+  issues: write
+  contents: read
 
 jobs:
   blast-radius-check:
@@ -29,10 +30,10 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js 20
+      - name: Setup Node.js 24
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
 
       - name: Install Dependencies
         run: npm ci
@@ -41,15 +42,18 @@ jobs:
         run: npx tsc
 
       - name: Run QueryGuard Action
-        uses: ./
-        with:
-          schema-path: 'test/schema.sql'
-          queries-path: 'test/queries.sql'
-          pg-host: 'localhost'
-          pg-port: '5432'
-          pg-user: 'postgres'
-          pg-password: 'postgres'
-          pg-database: 'testdb'
-          mock-rows: '500000'
-          fail-on-sev1: 'false'
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node dist/index.js \
+            --schema test/schema.sql \
+            --queries test/queries.sql \
+            --token "${{ secrets.GITHUB_TOKEN }}"
+        env:
+          PG_HOST: localhost
+          PG_PORT: 5432
+          PG_USER: postgres
+          PG_PASSWORD: postgres
+          PG_DATABASE: testdb
+          FAIL_ON_SEV1: 'true'
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
