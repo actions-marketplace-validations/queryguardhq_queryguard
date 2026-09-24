@@ -38,13 +38,14 @@ function extractColumn(filterClause?: string): string | null {
 }
 
 function splitSqlStatements(sqlContent: string): string[] {
+  // Strip comments and split by semicolon not inside quotes
   const sanitized = sqlContent
     .split('\n')
     .filter(line => !line.trim().startsWith('--'))
     .join('\n');
 
   return sanitized
-    .split(';')
+    .split(/;(?=(?:[^']*'[^']*')*[^']*$)/)
     .map(s => s.trim())
     .filter(s => s.length > 0);
 }
@@ -96,7 +97,6 @@ function analyzeDDLLocks(statements: string[]): Finding[] {
 async function scaffoldSyntheticData(client: Client, sampleCount: number) {
   console.log(`[QueryGuard] Auto-scaffolding zero-PII synthetic rows (${sampleCount} rows/table)...`);
 
-  // Bypass foreign key triggers during synthetic scaffolding
   await client.query(`SET session_replication_role = 'replica';`);
 
   try {
@@ -109,11 +109,11 @@ async function scaffoldSyntheticData(client: Client, sampleCount: number) {
     for (const row of tablesRes.rows) {
       const table = row.table_name;
       const colsRes = await client.query(`
-        SELECT column_name, data_type, column_default, is_nullable
+        SELECT column_name, data_type, column_default, is_nullable, udt_name
         FROM information_schema.columns 
         WHERE table_schema = 'public' 
           AND table_name = $1
-          AND (column_default IS NULL OR column_default NOT LIKE 'nextval%');
+          AND (column_default IS NULL OR (column_default NOT LIKE 'nextval%' AND column_default NOT LIKE 'gen_random_uuid%'));
       `, [table]);
 
       if (colsRes.rows.length === 0) continue;
@@ -123,11 +123,17 @@ async function scaffoldSyntheticData(client: Client, sampleCount: number) {
 
       for (const col of colsRes.rows) {
         colNames.push(`"${col.column_name}"`);
-        const dt = col.data_type.toLowerCase();
+        const dt = (col.data_type || '').toLowerCase();
+        const udt = (col.udt_name || '').toLowerCase();
 
         if (dt.includes('int')) {
-          // Use 1-indexed values so FK lookups match default primary keys
           valGenerators.push(`((i % 100) + 1)`);
+        } else if (dt.includes('uuid') || udt.includes('uuid')) {
+          valGenerators.push(`gen_random_uuid()`);
+        } else if (dt.includes('json') || udt.includes('json')) {
+          valGenerators.push(`'{"status":"synthetic"}'::jsonb`);
+        } else if (dt.includes('numeric') || dt.includes('decimal') || dt.includes('double') || dt.includes('real')) {
+          valGenerators.push(`((i % 1000) * 1.25)`);
         } else if (dt.includes('char') || dt.includes('text')) {
           valGenerators.push(`'sample_' || i || CASE WHEN i % 100 = 0 THEN 'pending' ELSE 'active' END`);
         } else if (dt.includes('timestamp') || dt.includes('date')) {
@@ -135,7 +141,8 @@ async function scaffoldSyntheticData(client: Client, sampleCount: number) {
         } else if (dt.includes('bool')) {
           valGenerators.push(`(i % 2 = 0)`);
         } else {
-          valGenerators.push(`NULL`);
+          // If NOT NULL, inject an empty string fallback instead of crashing
+          valGenerators.push(col.is_nullable === 'NO' ? `''` : `NULL`);
         }
       }
 
@@ -154,7 +161,6 @@ async function scaffoldSyntheticData(client: Client, sampleCount: number) {
       }
     }
   } finally {
-    // Restore default trigger execution
     await client.query(`SET session_replication_role = 'origin';`);
   }
 }
@@ -259,7 +265,7 @@ async function run() {
       }
     }
 
-    // 3. Auto-Scaffold Zero-PII Synthetic Data for Cardinality Estimation
+    // 3. Auto-Scaffold Zero-PII Synthetic Data
     await scaffoldSyntheticData(client, config.mockRows);
 
     // 4. Evaluate SQL Query Plans
