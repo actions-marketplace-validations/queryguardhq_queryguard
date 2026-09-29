@@ -36,8 +36,6 @@
     textarea:focus, input:focus { outline: none; border-color: var(--accent); }
     .btn { background: #238636; color: #fff; border: 1px solid rgba(240,246,252,0.1); padding: 0.5rem 1rem; font-size: 0.85rem; font-weight: 600; border-radius: 6px; cursor: pointer; display: inline-flex; align-items: center; gap: 0.4rem; }
     .btn:hover { background: #2ea043; }
-    .btn-secondary { background: #21262d; border-color: var(--border); color: var(--text-bright); }
-    .btn-secondary:hover { background: #30363d; }
     .report-card { background: var(--code-bg); border: 1px solid var(--border); border-radius: 6px; padding: 1rem; margin-top: 1rem; }
     table { width: 100%; border-collapse: collapse; margin-top: 0.75rem; font-size: 0.82rem; }
     th, td { text-align: left; padding: 0.5rem 0.6rem; border: 1px solid var(--border); }
@@ -53,7 +51,7 @@
   <div class="container">
     <header>
       <div>
-        <h1>🛡️ QueryGuard Sentinel <span class="badge">v1.0.3 Live</span></h1>
+        <h1>🛡️ QueryGuard Sentinel <span class="badge">v1.1.0 Live</span></h1>
         <p style="font-size: 0.85rem; color: #8b949e; margin-top: 0.25rem;">Automated PostgreSQL Blast-Radius & Migration Lock Gating</p>
       </div>
       <div>
@@ -71,20 +69,12 @@
     <div id="simulator" class="tab-content active">
       <div class="grid">
         <div class="panel">
-          <label for="ddlInput">Migration DDL (Schema Modifications)</label>
-          <textarea id="ddlInput" rows="9">-- Paste test DDL statements here:
-CREATE TABLE users (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    email VARCHAR(255) NOT NULL,
-    status VARCHAR(50) DEFAULT 'active'
-);
-
--- Missing CONCURRENTLY triggers a SHARE table lock:
+          <label for="ddlInput">Incoming Migration DDL (Evaluated for SHARE / ACCESS EXCLUSIVE)</label>
+          <textarea id="ddlInput" rows="7">-- New index missing CONCURRENTLY triggers a SHARE lock warning:
 CREATE INDEX idx_users_status ON users(status);</textarea>
 
           <label for="queryInput">Application Queries (Evaluated Against Scaffolding)</label>
-          <textarea id="queryInput" rows="5">-- Paste hot application queries here:
-SELECT * FROM users WHERE email = 'target@company.com';</textarea>
+          <textarea id="queryInput" rows="5">SELECT * FROM users WHERE email = 'target@company.com';</textarea>
 
           <button class="btn" onclick="runClientSimulation()">Evaluate Blast-Radius</button>
         </div>
@@ -104,13 +94,17 @@ SELECT * FROM users WHERE email = 'target@company.com';</textarea>
         <h3 style="color: var(--text-bright); margin-bottom: 1rem;">Generate Your Custom GitHub Action Workflow</h3>
         <div class="grid" style="margin-bottom: 1rem;">
           <div>
-            <label for="cfgSchema">Path to Schema DDL / Migration File</label>
-            <input type="text" id="cfgSchema" value="db/schema.sql" oninput="updateYaml()">
+            <label for="cfgSchema">Baseline Schema Path (No Lock Checks)</label>
+            <input type="text" id="cfgSchema" value="db/baseline.sql" oninput="updateYaml()">
           </div>
           <div>
-            <label for="cfgQueries">Path to SQL Queries File</label>
-            <input type="text" id="cfgQueries" value="db/queries.sql" oninput="updateYaml()">
+            <label for="cfgMigration">Incoming Migration Path (Lock Gated)</label>
+            <input type="text" id="cfgMigration" value="db/migration.sql" oninput="updateYaml()">
           </div>
+        </div>
+        <div style="margin-bottom: 1rem;">
+          <label for="cfgQueries">Application Queries Path</label>
+          <input type="text" id="cfgQueries" value="db/queries.sql" oninput="updateYaml()">
         </div>
 
         <label>Generated Workflow File: <code>.github/workflows/queryguard.yml</code></label>
@@ -125,16 +119,12 @@ SELECT * FROM users WHERE email = 'target@company.com';</textarea>
     <div id="guide" class="tab-content">
       <div class="panel" style="line-height: 1.6; font-size: 0.9rem;">
         <h3 style="color: var(--text-bright); margin-bottom: 0.75rem;">3-Minute Verification Protocols for Beta Testers</h3>
-        <p style="margin-bottom: 1rem; color: #8b949e;">QueryGuard runs inside an ephemeral PostgreSQL 16 container inside your GitHub Actions runner. Zero PII, production rows, or query logs leave your infrastructure.</p>
+        <p style="margin-bottom: 1rem; color: #8b949e;">QueryGuard runs inside an ephemeral PostgreSQL container inside your GitHub Actions runner. Zero PII, production rows, or query logs leave your infrastructure.</p>
         
-        <h4 style="color: var(--text-bright); margin-top: 1rem;">Test 1: Migration Lock Sentinel</h4>
-        <p>Add <code>CREATE INDEX idx_test_lock ON table(col);</code> without <code>CONCURRENTLY</code> to your schema file. Verify that QueryGuard flags a <code>SHARE</code> lock and suggests the non-blocking concurrent replacement.</p>
-
-        <h4 style="color: var(--text-bright); margin-top: 1rem;">Test 2: Full Table Scan Detection</h4>
-        <p>Add an unindexed lookup <code>SELECT * FROM table WHERE unindexed_col = 'val';</code> to your queries file. Verify that QueryGuard executes zero-PII scaffolding, evaluates the sequential scan, and outputs a <code>CREATE INDEX CONCURRENTLY</code> fix.</p>
-
-        <h4 style="color: var(--text-bright); margin-top: 1rem;">Test 3: In-Place Comment Updates</h4>
-        <p>Push a second commit to the PR adding <code>CONCURRENTLY</code> and the index. Verify that QueryGuard patches the existing comment in-place with a clean passing report.</p>
+        <h4 style="color: var(--text-bright); margin-top: 1rem;">Decoupled Architecture</h4>
+        <p>• <b>Baseline Schema (<code>schema-path</code>):</b> Executed silently to build baseline tables, triggers, and existing indexes without false positive lock warnings.<br>
+        • <b>Incoming Migration (<code>migration-path</code>):</b> Inspected for non-concurrent indexes and blocking table rewrites.<br>
+        • <b>Queries (<code>queries-path</code>):</b> Run against type-aware synthetic scaffolding to verify planner cost scaling.</p>
       </div>
     </div>
   </div>
@@ -152,8 +142,7 @@ SELECT * FROM users WHERE email = 'target@company.com';</textarea>
       const queries = document.getElementById('queryInput').value;
       const findings = [];
 
-      // DDL Lock Analysis (Regex engine from src/index.ts)
-      const stmts = ddl.split('\n').filter(l => !l.trim().startsWith('--')).join('\n').split(';');
+      const stmts = ddl.split('\n').filter(l => !l.trim().startsWith('--') && !l.trim().startsWith('\\')).join('\n').split(';');
       for (const raw of stmts) {
         const stmt = raw.trim();
         if (/CREATE\s+(UNIQUE\s+)?INDEX/i.test(stmt) && !/CONCURRENTLY/i.test(stmt)) {
@@ -165,24 +154,14 @@ SELECT * FROM users WHERE email = 'target@company.com';</textarea>
             fix: `Use \`CREATE INDEX CONCURRENTLY ${match ? match[1] : 'idx'} ON ${match ? match[2] : 'table'} ...\``
           });
         }
-        if (/ALTER\s+TABLE\s+([a-zA-Z0-9_]+)\s+ALTER\s+COLUMN\s+([a-zA-Z0-9_]+)\s+(?:SET\s+DATA\s+)?TYPE/i.test(stmt)) {
-          const match = stmt.match(/ALTER\s+TABLE\s+([a-zA-Z0-9_]+)\s+ALTER\s+COLUMN\s+([a-zA-Z0-9_]+)/i);
-          findings.push({
-            type: 'ACCESS EXCLUSIVE',
-            table: match ? match[1] : 'table',
-            blast: 'Forces full table rewrite; blocks all reads and writes',
-            fix: `Stage transition via new column on \`${match ? match[1] : 'table'}\``
-          });
-        }
       }
 
-      // Query Unindexed Analysis Simulation
       const queryStmts = queries.split('\n').filter(l => !l.trim().startsWith('--')).join('\n').split(';');
       for (const raw of queryStmts) {
         const q = raw.trim();
         if (q.length > 0 && /WHERE\s+([a-zA-Z0-9_]+)/i.test(q)) {
           const m = q.match(/FROM\s+([a-zA-Z0-9_]+)\s+WHERE\s+([a-zA-Z0-9_]+)/i);
-          if (m && !ddl.includes(m[2])) {
+          if (m) {
             findings.push({
               type: 'Full Table Scan',
               table: m[1],
@@ -193,7 +172,7 @@ SELECT * FROM users WHERE email = 'target@company.com';</textarea>
         }
       }
 
-      let html = `<h4 style="color: var(--text-bright); margin-bottom: 0.5rem;">🛡️ QueryGuard Pre-Merge Blast-Radius Report</h4>`;
+      let html = `<h4 style="color: var(--text-bright); margin-bottom: 0.5rem;">🛡️️ QueryGuard Pre-Merge Blast-Radius Report</h4>`;
       html += `<p style="font-size: 0.75rem; color: #8b949e; margin-bottom: 0.75rem;">*Last evaluated: \`${new Date().toISOString().replace('T', ' ').substring(0, 19)} UTC\`*</p>`;
 
       if (findings.length === 0) {
@@ -211,7 +190,8 @@ SELECT * FROM users WHERE email = 'target@company.com';</textarea>
     }
 
     function updateYaml() {
-      const s = document.getElementById('cfgSchema').value || 'db/schema.sql';
+      const s = document.getElementById('cfgSchema').value || 'db/baseline.sql';
+      const m = document.getElementById('cfgMigration').value || 'db/migration.sql';
       const q = document.getElementById('cfgQueries').value || 'db/queries.sql';
       const yaml = `name: QueryGuard Blast-Radius Sentinel
 
@@ -248,7 +228,8 @@ jobs:
       - name: Run QueryGuard Sentinel
         uses: munir-pathak/queryguard@v1
         with:
-          schema-path: '${s}'
+          schema-path: '${s}'          # Baseline schema (zero lock checks)
+          migration-path: '${m}'       # Incoming migration (lock checked)
           queries-path: '${q}'
           pg-host: 'localhost'
           pg-port: '5432'
@@ -267,7 +248,6 @@ jobs:
       setTimeout(() => btn.textContent = 'Copy YAML', 1500);
     }
 
-    // Initialize defaults
     updateYaml();
     runClientSimulation();
   </script>
