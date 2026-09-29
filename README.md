@@ -1,18 +1,77 @@
-# QueryGuard
+# 🛡️ QueryGuard
 
-QueryGuard is an automated CI/CD blast-radius sentinel for PostgreSQL that detects full table scans and blocking migration locks (`ACCESS EXCLUSIVE` and `SHARE`) prior to merging.
+[![GitHub release](https://img.shields.io/github/v/release/munir-pathak/queryguard?color=blue)](https://github.com/munir-pathak/queryguard/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Live Sandbox](https://img.shields.io/badge/Web%20App-Live%20Sandbox-blueviolet)](https://query-guard.netlify.app/)
 
-## Features
+**QueryGuard** is an automated PostgreSQL blast-radius sentinel and migration lock linter. It prevents table-locking database migrations (`ACCESS EXCLUSIVE` and `SHARE` locks) and unindexed full table scans from reaching production AWS RDS and Aurora instances.
 
-- **Sequential Scan Detection:** Evaluates execution plans against mocked production catalog distributions.
-- **Migration Lock Sentinel:** Flags non-concurrent index creations and blocking table rewrites.
-- **Automated DDL Remediation:** Generates copy-pasteable `CREATE INDEX CONCURRENTLY` statements directly inside PR comments.
-- **In-Place Comment Updating:** Keeps PR discussion threads clean by updating reports in place.
-- **CI Gating (`fail-on-sev1`):** Blocks unindexed regressions from reaching production databases.
+It operates upstream across three layers:
+1. **Pre-Commit Static Linter:** Runs locally in `< 20ms` with zero database or container dependencies.
+2. **AI Coding Agent Sentinel:** Directs tools like Claude Code, Cursor, and Devin via `AGENTS.md` to self-correct non-concurrent DDL before staging.
+3. **Pre-Merge CI Sentinel:** Executes against an ephemeral PostgreSQL container inside GitHub Actions, scaffolding type-aware synthetic data to evaluate query planner costs and updating PR comments in place.
 
-## Usage
+👉 **Interactive Hub & Configurator:** [https://query-guard.netlify.app/](https://query-guard.netlify.app/)
 
-Add the following workflow to `.github/workflows/queryguard.yml` in any target repository:
+---
+
+## ⚡ Three-Tier Architecture
+
+| Layer | Trigger Point | Execution Mechanism | Latency | Infrastructure Required |
+| :--- | :--- | :--- | :--- | :--- |
+| **1. Static Linter** | Git Pre-Commit / Local CLI | AST & regex parsing via token stream | `< 20ms` | Zero (No DB, No Docker) |
+| **2. AI Agent Guard** | Agent Task Completion | Terminal command invoked via `AGENTS.md` | `< 20ms` | Zero (No DB, No Docker) |
+| **3. CI PR Gate** | Pull Request Open / Sync | Ephemeral Postgres 16 container + `EXPLAIN` | `~8s` | GitHub Actions Runner |
+
+---
+
+## 1. Local Pre-Commit Linter (Zero DB)
+
+Evaluate migration files on developer workstations before pushing code:
+
+```bash
+npx queryguard --lint --migration path/to/migration.sql
+```
+
+* **Exit Code `0`:** Clean. All indexes use `CONCURRENTLY` and column types are not altered in place.
+* **Exit Code `1`:** Hazard detected. Emits copy-pasteable remediation SQL.
+
+### Enforce via Git Pre-Commit Hook
+
+Add this check to `.husky/pre-commit` or `.git/hooks/pre-commit` to prevent dangerous DDL from being committed:
+
+```bash
+git diff --cached --name-only --diff-filter=ACM | grep -E "\.sql$" | while read -r file; do
+  npx queryguard --lint --migration "$file" || exit 1
+done
+```
+
+---
+
+## 2. AI Coding Agent Protocol (`AGENTS.md`)
+
+AI coding agents routinely generate non-concurrent indexes and blocking table rewrites. Add an `AGENTS.md` file to your repository root to enforce self-correction:
+
+```markdown
+# Database Safety Guidelines for AI Coding Agents
+
+When authoring or modifying database schemas, migrations, or database queries:
+
+1. **Migration Lock Rules:**
+   - Always use `CREATE INDEX CONCURRENTLY` on existing tables. Never acquire a `SHARE` lock.
+   - Never run `ALTER COLUMN ... TYPE ...` in place; stage transitions using a new nullable column to avoid `ACCESS EXCLUSIVE` locks.
+
+2. **Pre-Completion Validation:**
+   - Before completing tasks modifying migrations, run:
+     `npx queryguard --lint --migration <path-to-file>`
+   - If the command exits with code 1, apply the suggested fix and re-run until it exits with code 0.
+```
+
+---
+
+## 3. Pre-Merge PR Sentinel (GitHub Actions)
+
+Add `.github/workflows/queryguard.yml` to evaluate incoming pull requests.
 
 ```yaml
 name: QueryGuard Blast-Radius Sentinel
@@ -22,7 +81,6 @@ on:
 
 permissions:
   pull-requests: write
-  issues: write
   contents: read
 
 jobs:
@@ -47,31 +105,44 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Run QueryGuard
+      - name: Run QueryGuard Sentinel
         uses: munir-pathak/queryguard@v1
         with:
-          schema-path: 'test/schema.sql'
-          queries-path: 'test/queries.sql'
-          pg-host: 'localhost'
-          pg-port: '5432'
-          pg-user: 'postgres'
-          pg-password: 'postgres'
-          pg-database: 'testdb'
-          fail-on-sev1: 'true'
+          schema-path: 'db/schema.sql'
+          migration-path: 'db/migrations/latest.sql'
+          queries-path: 'db/queries.sql'
+          fail-on-sev1: 'false'
           github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
 
-## Inputs
+---
 
-| Input | Required | Default | Description |
+## ⚙️ Action Configuration Parameters
+
+| Input Parameter | Description | Default | Required |
 | :--- | :--- | :--- | :--- |
-| `schema-path` | **Yes** | `test/schema.sql` | Path to SQL schema DDL or migration file |
-| `queries-path` | **Yes** | `test/queries.sql` | Path to SQL queries file to benchmark |
-| `fail-on-sev1` | No | `'false'` | Fail CI step on critical scan or lock detection |
-| `github-token` | No | `''` | GitHub token required for PR commenting |
-| `pg-host` | No | `'localhost'` | PostgreSQL host |
-| `pg-port` | No | `'5432'` | PostgreSQL port |
-| `pg-user` | No | `'postgres'` | PostgreSQL user |
-| `pg-password` | No | `'postgres'` | PostgreSQL password |
-| `pg-database` | No | `'postgres'` | PostgreSQL database name |
-| `mock-rows` | No | `'500000'` | Simulated cardinality scale factor |
+| `schema-path` | Path to baseline schema DDL (e.g., `pg_dump --schema-only`). Applied without lock checks. | `''` | No |
+| `migration-path` | Path to incoming PR migration DDL. Analyzed for `ACCESS EXCLUSIVE` and `SHARE` locks. | `''` | No |
+| `queries-path` | Path to SQL queries file evaluated for sequential scans against synthetic data. | `'test/queries.sql'` | Yes |
+| `fail-on-sev1` | Hard-fail CI (exit code 1) if a critical sequential scan or lock hazard is detected. | `'false'` | No |
+| `mock-rows` | Synthetic row count generated per table for catalog cost simulation. | `'2000'` | No |
+| `github-token` | GitHub token for posting and editing in-place PR comment reports. | `''` | No |
+| `pg-host` | PostgreSQL container host. | `'localhost'` | No |
+| `pg-port` | PostgreSQL container port. | `'5432'` | No |
+| `pg-user` | PostgreSQL username. | `'postgres'` | No |
+| `pg-password` | PostgreSQL password. | `'postgres'` | No |
+| `pg-database` | PostgreSQL database name. | `'postgres'` | No |
+
+---
+
+## 🔒 Zero-PII Data Privacy Guarantee
+
+* **100% Ephemeral Customer Compute:** Runs inside your existing GitHub Actions runner or local machine.
+* **No Outbound Data Ingestion:** Zero queries, schema definitions, table names, or customer data leave your infrastructure.
+* **Synthetic Scaffolding:** Generates mock records dynamically across modern PostgreSQL types (`UUID`, `JSONB`, `NUMERIC`, `TIMESTAMP`) and disables foreign keys via `session_replication_role = 'replica'`.
+
+---
+
+## 📄 License
+
+QueryGuard is open-source software licensed under the [MIT License](LICENSE).
