@@ -1,4 +1,4 @@
-# 🛡️ QueryGuard
+# 🛡️️ QueryGuard
 
 [![GitHub release](https://img.shields.io/github/v/release/munir-pathak/queryguard?color=blue)](https://github.com/munir-pathak/queryguard/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
@@ -30,6 +30,10 @@ It operates upstream across three layers:
 Evaluate migration files on developer workstations before pushing code:
 
 ```bash
+# View CLI options and help
+npx queryguard --help
+
+# Ad-hoc static lock validation
 npx queryguard --lint --migration path/to/migration.sql
 ```
 
