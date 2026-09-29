@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { Client } from 'pg';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -47,7 +48,6 @@ export function splitSqlStatements(sqlContent: string): string[] {
   let inLineComment = false;
   let dollarTag: string | null = null;
 
-  // Filter out psql slash commands (e.g. \restrict, \connect, \set)
   const lines = sqlContent.split('\n');
   const sanitizedLines = lines.filter(line => !line.trim().startsWith('\\'));
   const fullText = sanitizedLines.join('\n');
@@ -139,7 +139,7 @@ export function splitSqlStatements(sqlContent: string): string[] {
   return statements;
 }
 
-function analyzeDDLLocks(statements: string[]): Finding[] {
+export function analyzeDDLLocks(statements: string[]): Finding[] {
   const findings: Finding[] = [];
 
   for (const stmt of statements) {
@@ -158,7 +158,7 @@ function analyzeDDLLocks(statements: string[]): Finding[] {
         isLockRisk: true,
         lockType: 'SHARE',
         targetTable: tableName,
-        recommendation: `Use \`CREATE INDEX CONCURRENTLY ${indexName} ON${tableName} ...\` to prevent blocking writes.`,
+        recommendation: `Use \`CREATE INDEX CONCURRENTLY ${indexName} ON ${tableName} ...\` to prevent blocking writes.`,
       });
     }
 
@@ -255,7 +255,6 @@ async function scaffoldSyntheticData(client: Client, sampleCount: number) {
 async function upsertGithubComment(token: string, report: string) {
   const eventPath = process.env.GITHUB_EVENT_PATH;
   if (!eventPath || !fs.existsSync(eventPath)) {
-    console.log('[QueryGuard] GITHUB_EVENT_PATH missing; skipping comment.');
     return;
   }
 
@@ -264,7 +263,6 @@ async function upsertGithubComment(token: string, report: string) {
   const repository = process.env.GITHUB_REPOSITORY;
 
   if (!prNumber || !repository) {
-    console.log(`[QueryGuard] Non-PR context (PR: ${prNumber}, Repo: ${repository}); skipping comment.`);
     return;
   }
 
@@ -288,7 +286,6 @@ async function upsertGithubComment(token: string, report: string) {
     }
 
     if (existingComment) {
-      console.log(`[QueryGuard] Updating report comment (ID: ${existingComment.id}) in place...`);
       const updateUrl = `https://api.github.com/repos/${repository}/issues/comments/${existingComment.id}`;
       const patchRes = await fetch(updateUrl, {
         method: 'PATCH',
@@ -300,7 +297,6 @@ async function upsertGithubComment(token: string, report: string) {
         console.log('[QueryGuard] PR comment successfully updated in place.');
         return;
       }
-      console.warn(`[QueryGuard] PATCH failed (${patchRes.status}). Falling back to POST...`);
     }
 
     const postRes = await fetch(commentsUrl, {
@@ -311,9 +307,6 @@ async function upsertGithubComment(token: string, report: string) {
 
     if (postRes.ok) {
       console.log('[QueryGuard] Successfully posted comment.');
-    } else {
-      const err = await postRes.text();
-      console.error(`[QueryGuard] Failed posting comment: ${err}`);
     }
   } catch (err: any) {
     console.error(`[QueryGuard] API error during comment upsert: ${err.message}`);
@@ -321,7 +314,40 @@ async function upsertGithubComment(token: string, report: string) {
 }
 
 async function run() {
+  const isLintMode = process.argv.includes('--lint') || process.argv.includes('--lint-only');
   const config = resolveConfig();
+
+  // -------------------------------------------------------------
+  // TIER 1: Zero-Dependency Static Linter (No DB connection needed)
+  // -------------------------------------------------------------
+  if (isLintMode) {
+    const targetFile = config.migrationPath || config.schemaPath || process.argv[3];
+    if (!targetFile || !fs.existsSync(targetFile)) {
+      console.error('❌ [QueryGuard Lint Error] Target file not found. Provide a valid path via --migration <file>');
+      process.exit(1);
+    }
+
+    const rawSql = fs.readFileSync(path.resolve(targetFile), 'utf8');
+    const statements = splitSqlStatements(rawSql);
+    const hazards = analyzeDDLLocks(statements);
+
+    if (hazards.length === 0) {
+      console.log(`✅ [QueryGuard Lint] Clean: Evaluated ${statements.length} statement(s) in '${targetFile}'. Zero blocking migration locks detected.`);
+      process.exit(0);
+    } else {
+      console.error(`\n🚨 [QueryGuard Lint] Found ${hazards.length} dangerous migration lock hazard(s) in '${targetFile}':\n`);
+      for (const h of hazards) {
+        console.error(`  • [${h.lockType}] Table: '${h.targetTable}'`);
+        console.error(`    Hazard: ${h.query}`);
+        console.error(`    Fix:    ${h.recommendation}\n`);
+      }
+      process.exit(1);
+    }
+  }
+
+  // -------------------------------------------------------------
+  // TIER 2 & 3: Runtime Gating Sentinel (Requires PostgreSQL)
+  // -------------------------------------------------------------
   const client = new Client({
     host: config.pgHost,
     port: config.pgPort,
@@ -334,7 +360,6 @@ async function run() {
   await client.connect();
 
   try {
-    // 1. Apply Baseline Schema (Silent: ZERO lock checks)
     if (config.schemaPath && fs.existsSync(config.schemaPath)) {
       const resolvedSchema = path.resolve(config.schemaPath);
       console.log(`[QueryGuard] Applying baseline schema (no lock gating): ${resolvedSchema}`);
@@ -348,7 +373,6 @@ async function run() {
       }
     }
 
-    // 2. Analyze & Apply Incoming PR Migration
     const lockFindings: Finding[] = [];
     if (config.migrationPath && fs.existsSync(config.migrationPath)) {
       const resolvedMigration = path.resolve(config.migrationPath);
@@ -368,10 +392,8 @@ async function run() {
       }
     }
 
-    // 3. Auto-Scaffold Synthetic Data
     await scaffoldSyntheticData(client, config.mockRows);
 
-    // 4. Evaluate SQL Query Plans
     const resolvedQueries = path.resolve(config.queriesPath);
     console.log(`[QueryGuard] Evaluating queries: ${resolvedQueries}`);
     const queryStatements = splitSqlStatements(fs.readFileSync(resolvedQueries, 'utf8'));

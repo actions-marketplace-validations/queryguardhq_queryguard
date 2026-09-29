@@ -1,25 +1,32 @@
 {
   "name": "queryguard",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "test:local": "node dist/index.js --schema test/schema.sql --queries test/queries.sql",
-    "start": "tsx src/index.ts"
+  "version": "1.2.0",
+  "description": "Pre-merge PostgreSQL blast-radius and migration lock analyzer.",
+  "main": "dist/index.js",
+  "bin": {
+    "queryguard": "dist/index.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
+  "scripts": {
+    "build": "tsc",
+    "lint:sql": "node dist/index.js --lint",
+    "test:local": "node dist/index.js --schema test/baseline_dump.sql --migration test/new_migration.sql --queries test/queries.sql"
+  },
+  "keywords": [
+    "postgres",
+    "postgresql",
+    "migrations",
+    "explain",
+    "github-actions",
+    "database-linter"
+  ],
+  "author": "Munir Pathak",
+  "license": "MIT",
   "dependencies": {
-    "pg": "^8.23.0"
+    "pg": "^8.11.3"
   },
   "devDependencies": {
-    "@types/node": "^26.6.1",
-    "@types/pg": "^8.23.1",
-    "ts-node": "^10.9.2",
-    "tsx": "^4.23.13",
-    "typescript": "^7.0.2"
+    "@types/node": "^20.11.0",
+    "@types/pg": "^8.11.0",
+    "typescript": "^5.3.3"
   }
 }
