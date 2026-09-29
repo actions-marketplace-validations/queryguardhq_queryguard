@@ -7,9 +7,13 @@ branding:
 
 inputs:
   schema-path:
-    description: 'Path to schema DDL file or migration directory'
-    required: true
-    default: 'test/schema.sql'
+    description: 'Path to baseline schema DDL (e.g., pg_dump --schema-only). Applied without lock checks.'
+    required: false
+    default: ''
+  migration-path:
+    description: 'Path to incoming PR migration DDL. Analyzed for ACCESS EXCLUSIVE and SHARE locks.'
+    required: false
+    default: ''
   queries-path:
     description: 'Path to SQL queries file to evaluate'
     required: true

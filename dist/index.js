@@ -33,6 +33,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.splitSqlStatements = splitSqlStatements;
 const pg_1 = require("pg");
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
@@ -48,7 +49,8 @@ function getParam(flag, actionInputKey, fallback) {
 }
 function resolveConfig() {
     return {
-        schemaPath: getParam('--schema', 'schema-path', 'test/schema.sql'),
+        schemaPath: getParam('--schema', 'schema-path', ''),
+        migrationPath: getParam('--migration', 'migration-path', ''),
         queriesPath: getParam('--queries', 'queries-path', 'test/queries.sql'),
         pgHost: process.env.PG_HOST || getParam('--host', 'pg-host', 'localhost'),
         pgPort: parseInt(process.env.PG_PORT || getParam('--port', 'pg-port', '5432'), 10),
@@ -68,15 +70,94 @@ function extractColumn(filterClause) {
     return match ? match[1] : null;
 }
 function splitSqlStatements(sqlContent) {
-    // Strip comments and split by semicolon not inside quotes
-    const sanitized = sqlContent
-        .split('\n')
-        .filter(line => !line.trim().startsWith('--'))
-        .join('\n');
-    return sanitized
-        .split(/;(?=(?:[^']*'[^']*')*[^']*$)/)
-        .map(s => s.trim())
-        .filter(s => s.length > 0);
+    const statements = [];
+    let currentStmt = '';
+    let inSingleQuote = false;
+    let inDoubleQuote = false;
+    let inBlockComment = false;
+    let inLineComment = false;
+    let dollarTag = null;
+    // Filter out psql slash commands (e.g. \restrict, \connect, \set)
+    const lines = sqlContent.split('\n');
+    const sanitizedLines = lines.filter(line => !line.trim().startsWith('\\'));
+    const fullText = sanitizedLines.join('\n');
+    const len = fullText.length;
+    for (let i = 0; i < len; i++) {
+        const char = fullText[i];
+        const nextChar = i + 1 < len ? fullText[i + 1] : '';
+        if (inLineComment) {
+            if (char === '\n')
+                inLineComment = false;
+            continue;
+        }
+        if (inBlockComment) {
+            if (char === '*' && nextChar === '/') {
+                inBlockComment = false;
+                i++;
+            }
+            continue;
+        }
+        if (!inSingleQuote && !inDoubleQuote && !dollarTag) {
+            if (char === '-' && nextChar === '-') {
+                inLineComment = true;
+                i++;
+                continue;
+            }
+            if (char === '/' && nextChar === '*') {
+                inBlockComment = true;
+                i++;
+                continue;
+            }
+        }
+        if (char === "'" && !inDoubleQuote && !dollarTag) {
+            if (inSingleQuote && nextChar === "'") {
+                currentStmt += "''";
+                i++;
+                continue;
+            }
+            inSingleQuote = !inSingleQuote;
+            currentStmt += char;
+            continue;
+        }
+        if (char === '"' && !inSingleQuote && !dollarTag) {
+            inDoubleQuote = !inDoubleQuote;
+            currentStmt += char;
+            continue;
+        }
+        if (char === '$' && !inSingleQuote && !inDoubleQuote) {
+            if (dollarTag === null) {
+                const tagMatch = fullText.substring(i).match(/^(\$[a-zA-Z0-9_]*\$)/);
+                if (tagMatch) {
+                    dollarTag = tagMatch[1];
+                    currentStmt += dollarTag;
+                    i += dollarTag.length - 1;
+                    continue;
+                }
+            }
+            else {
+                if (fullText.substring(i).startsWith(dollarTag)) {
+                    currentStmt += dollarTag;
+                    i += dollarTag.length - 1;
+                    dollarTag = null;
+                    continue;
+                }
+            }
+        }
+        if (char === ';' && !inSingleQuote && !inDoubleQuote && !dollarTag) {
+            const trimmed = currentStmt.trim();
+            if (trimmed.length > 0) {
+                statements.push(trimmed);
+            }
+            currentStmt = '';
+            continue;
+        }
+        currentStmt += char;
+    }
+    const finalTrimmed = currentStmt.trim();
+    if (finalTrimmed.length > 0) {
+        statements.push(finalTrimmed);
+    }
+    return statements;
 }
 function analyzeDDLLocks(statements) {
     const findings = [];
@@ -163,7 +244,6 @@ async function scaffoldSyntheticData(client, sampleCount) {
                     valGenerators.push(`(i % 2 = 0)`);
                 }
                 else {
-                    // If NOT NULL, inject an empty string fallback instead of crashing
                     valGenerators.push(col.is_nullable === 'NO' ? `''` : `NULL`);
                 }
             }
@@ -259,23 +339,39 @@ async function run() {
     console.log(`[QueryGuard] Connecting to database at ${config.pgHost}:${config.pgPort}/${config.pgDb}...`);
     await client.connect();
     try {
-        const resolvedSchema = path.resolve(config.schemaPath);
-        console.log(`[QueryGuard] Inspecting schema DDL: ${resolvedSchema}`);
-        const ddlRaw = fs.readFileSync(resolvedSchema, 'utf8');
-        const ddlStatements = splitSqlStatements(ddlRaw);
-        // 1. Analyze Migration DDL Locks
-        const lockFindings = analyzeDDLLocks(ddlStatements);
-        console.log(`[QueryGuard] Detected ${lockFindings.length} migration lock hazard(s).`);
-        // 2. Apply Schema DDL
-        for (const stmt of ddlStatements) {
-            try {
-                await client.query(stmt);
-            }
-            catch (err) {
-                console.warn(`[QueryGuard] Warning: Failed applying DDL statement: "${stmt.substring(0, 40)}..." -> ${err.message}`);
+        // 1. Apply Baseline Schema (Silent: ZERO lock checks)
+        if (config.schemaPath && fs.existsSync(config.schemaPath)) {
+            const resolvedSchema = path.resolve(config.schemaPath);
+            console.log(`[QueryGuard] Applying baseline schema (no lock gating): ${resolvedSchema}`);
+            const schemaStatements = splitSqlStatements(fs.readFileSync(resolvedSchema, 'utf8'));
+            for (const stmt of schemaStatements) {
+                try {
+                    await client.query(stmt);
+                }
+                catch (err) {
+                    console.warn(`[QueryGuard] Warning: Failed executing baseline statement: "${stmt.substring(0, 40)}..." -> ${err.message}`);
+                }
             }
         }
-        // 3. Auto-Scaffold Zero-PII Synthetic Data
+        // 2. Analyze & Apply Incoming PR Migration
+        const lockFindings = [];
+        if (config.migrationPath && fs.existsSync(config.migrationPath)) {
+            const resolvedMigration = path.resolve(config.migrationPath);
+            console.log(`[QueryGuard] Analyzing incoming migration for locks: ${resolvedMigration}`);
+            const migrationStatements = splitSqlStatements(fs.readFileSync(resolvedMigration, 'utf8'));
+            const hazards = analyzeDDLLocks(migrationStatements);
+            lockFindings.push(...hazards);
+            console.log(`[QueryGuard] Detected ${hazards.length} migration lock hazard(s) in incoming migration.`);
+            for (const stmt of migrationStatements) {
+                try {
+                    await client.query(stmt);
+                }
+                catch (err) {
+                    console.warn(`[QueryGuard] Warning: Failed applying migration statement: "${stmt.substring(0, 40)}..." -> ${err.message}`);
+                }
+            }
+        }
+        // 3. Auto-Scaffold Synthetic Data
         await scaffoldSyntheticData(client, config.mockRows);
         // 4. Evaluate SQL Query Plans
         const resolvedQueries = path.resolve(config.queriesPath);

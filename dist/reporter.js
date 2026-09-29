@@ -2,37 +2,34 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.buildMarkdownReport = buildMarkdownReport;
 function buildMarkdownReport(findings) {
-    const severe = findings.filter(f => f.hasSeqScan || f.isLockRisk);
-    const now = new Date().toISOString().replace('T', ' ').substring(0, 19) + ' UTC';
+    const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19) + ' UTC';
+    const criticalCount = findings.filter(f => f.hasSeqScan || f.isLockRisk).length;
     let md = `## 🛡️ QueryGuard Pre-Merge Blast-Radius Report\n\n`;
-    md += `*Last evaluated: \`${now}\`*\n\n`;
-    if (severe.length === 0) {
+    md += `*Last evaluated: \`${timestamp}\`*\n\n`;
+    if (criticalCount === 0) {
         md += `✅ **All checks passed.** Zero unindexed full table scans and zero blocking migration locks detected.\n`;
         return md;
     }
-    md += `⚠️ **High Blast-Radius Warning:** Detected **${severe.length}** risky database pattern(s).\n\n`;
+    md += `⚠️ **High Blast-Radius Warning:** Detected **${criticalCount}** risky database pattern(s).\n\n`;
     md += `| Severity | Issue Type | Target Table | Blast Radius | Suggested Fix |\n`;
     md += `| :--- | :--- | :--- | :--- | :--- |\n`;
-    for (const f of severe) {
-        const table = f.targetTable || 'unknown';
+    for (const f of findings) {
         if (f.isLockRisk) {
-            const lockLabel = f.lockType || 'ACCESS EXCLUSIVE';
-            const blastRadius = lockLabel === 'SHARE'
-                ? 'Blocks concurrent table writes (`INSERT`/`UPDATE`/`DELETE`)'
-                : 'Blocks all concurrent `SELECT` queries and writes';
-            md += `| 🚨 CRITICAL | \`${lockLabel}\` Lock | \`${table}\` | ${blastRadius} \vert{}${f.recommendation} |\n`;
+            const blastDesc = f.lockType === 'ACCESS EXCLUSIVE'
+                ? 'Forces table rewrite; blocks all reads and writes'
+                : 'Blocks concurrent table writes (`INSERT`/`UPDATE`/`DELETE`)';
+            md += `| 🚨 CRITICAL | \`${f.lockType}\` Lock | \`${f.targetTable || 'unknown'}\` | ${blastDesc} | \`${f.recommendation || ''}\` |\n`;
         }
-        else {
-            const rows = (f.impactedRows || 0).toLocaleString();
-            const cost = f.totalCost.toFixed(1);
-            const rec = f.recommendation ? `\`${f.recommendation}\`` : 'Add covering index';
-            md += `| 🚨 CRITICAL | Full Table Scan | \`${table}\` | Scans ~${rows} rows (Cost: ${cost}) | ${rec} |\n`;
+        else if (f.hasSeqScan) {
+            const blastDesc = `Scans ~${f.impactedRows?.toLocaleString() || '0'} rows (Cost: ${f.totalCost.toFixed(1)})`;
+            md += `| 🚨 CRITICAL | Full Table Scan | \`${f.targetTable || 'unknown'}\` | ${blastDesc} | \`${f.recommendation || ''}\` |\n`;
         }
     }
     md += `\n<details><summary><b>View Impacted Statements</b></summary>\n\n`;
-    const uniqueStatements = Array.from(new Set(severe.map(s => s.query)));
-    for (const stmt of uniqueStatements) {
-        md += `\`\`\`sql\n${stmt};\n\`\`\`\n`;
+    for (const f of findings) {
+        if (f.isLockRisk || f.hasSeqScan) {
+            md += `\`\`\`sql\n${f.query}\n\`\`\`\n`;
+        }
     }
     md += `</details>\n`;
     return md;
