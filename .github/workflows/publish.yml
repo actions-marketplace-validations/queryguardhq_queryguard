@@ -24,16 +24,10 @@ jobs:
       - name: Install Dependencies
         run: npm ci
 
-      - name: Rebuild Distribution Bundle
-        run: |
-          npm run build
-          chmod +x dist/index.js
-
-      - name: Ensure Clean Working Tree for Provenance
+      - name: Verify Clean Worktree for Provenance
         run: |
           git status --porcelain
-          git checkout -- .
-          git clean -fd
+          test -z "$(git status --porcelain)"
 
       - name: Publish to npm with Provenance
         run: npm publish --provenance --access public
