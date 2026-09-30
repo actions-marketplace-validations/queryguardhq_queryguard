@@ -1,4 +1,4 @@
-name: 'QueryGuard'
+name: 'QueryGuard Sentinel'
 author: 'Munir Pathak'
 description: 'Pre-merge PostgreSQL blast-radius and migration lock analyzer.'
 branding:
