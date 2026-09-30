@@ -6,8 +6,15 @@
   "bin": {
     "queryguard": "dist/index.js"
   },
+  "files": [
+    "dist",
+    "action.yml",
+    "README.md",
+    "LICENSE",
+    "AGENTS.md"
+  ],
   "scripts": {
-    "build": "tsc",
+    "build": "ncc build src/index.ts -o dist --minify --license licenses.txt",
     "lint:sql": "node dist/index.js --lint",
     "test:local": "node dist/index.js --schema test/baseline_dump.sql --migration test/new_migration.sql --queries test/queries.sql"
   },
@@ -27,6 +34,7 @@
   "devDependencies": {
     "@types/node": "^20.11.0",
     "@types/pg": "^8.11.0",
+    "@vercel/ncc": "^0.38.4",
     "typescript": "^5.3.3"
   }
 }

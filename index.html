@@ -63,7 +63,7 @@
         <p style="margin-top: 0.25rem;">Automated PostgreSQL blast-radius analysis & table-locking migration sentinel.</p>
       </div>
       <div>
-        <a href="https://github.com/munir-pathak/queryguard" target="_blank" style="color: var(--accent); text-decoration: none; font-size: 0.85rem; font-weight: 500;">GitHub Repository (v1.2.0) →</a>
+        <a href="https://github.com/queryguardhq/queryguard" target="_blank" style="color: var(--accent); text-decoration: none; font-size: 0.85rem; font-weight: 500;">GitHub Repository (v1.2.0) →</a>
       </div>
     </header>
 
@@ -356,7 +356,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run QueryGuard Sentinel
-        uses: munir-pathak/queryguard@v1
+        uses: queryguardhq/queryguard@v1
         with:
           schema-path: '${s}'          # Baseline schema (applied silently, no false positives)
           migration-path: '${m}'       # Incoming PR migration (evaluated for locks)

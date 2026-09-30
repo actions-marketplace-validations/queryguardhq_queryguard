@@ -1,6 +1,6 @@
 # 🛡️️ QueryGuard
 
-[![GitHub release](https://img.shields.io/github/v/release/munir-pathak/queryguard?color=blue)](https://github.com/munir-pathak/queryguard/releases)
+[![GitHub release](https://img.shields.io/github/v/release/queryguardhq/queryguard?color=blue)](https://github.com/queryguardhq/queryguard/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Live Sandbox](https://img.shields.io/badge/Web%20App-Live%20Sandbox-blueviolet)](https://query-guard.netlify.app/)
 
@@ -110,7 +110,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run QueryGuard Sentinel
-        uses: munir-pathak/queryguard@v1
+        uses: queryguardhq/queryguard@v1
         with:
           schema-path: 'db/schema.sql'
           migration-path: 'db/migrations/latest.sql'

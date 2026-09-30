@@ -158,7 +158,7 @@ export function analyzeDDLLocks(statements: string[]): Finding[] {
         isLockRisk: true,
         lockType: 'SHARE',
         targetTable: tableName,
-        recommendation: `Use \`CREATE INDEX CONCURRENTLY ${indexName} ON ${tableName} ...\` to prevent blocking writes.`,
+        recommendation: `Use \`CREATE INDEX CONCURRENTLY ${indexName} ON${tableName} ...\` to prevent blocking writes.`,
       });
     }
 
@@ -314,6 +314,39 @@ async function upsertGithubComment(token: string, report: string) {
 }
 
 async function run() {
+  const showHelp = process.argv.includes('--help') || process.argv.includes('-h');
+  const isGitHubAction = !!process.env.GITHUB_ACTIONS;
+
+  // -------------------------------------------------------------
+  // USAGE / HELP SCREEN
+  // -------------------------------------------------------------
+  if (showHelp || (!isGitHubAction && process.argv.length <= 2)) {
+    console.log(`
+🛡️ QueryGuard Sentinel (v1.2.0)
+Automated PostgreSQL blast-radius analysis & migration lock sentinel.
+
+USAGE:
+  # 1. Static Linter Mode (Zero DB, < 20ms)
+  $ npx queryguard --lint --migration <path-to-sql-file>
+
+  # 2. Local Blast-Radius Runtime Check (Requires PostgreSQL)
+  $ npx queryguard --schema <baseline.sql> --migration <new.sql> --queries <queries.sql>
+
+OPTIONS:
+  --lint, --lint-only    Run zero-dependency AST lock analysis on a migration file
+  --migration            Path to incoming migration file(s) to evaluate for locks
+  --schema               Path to baseline schema DDL (applied without lock checks)
+  --queries              Path to SQL queries evaluated for sequential scans
+  --mock-rows            Row count generated for synthetic simulation (default: 2000)
+  --fail-on-sev1         Exit code 1 if critical lock or seq scan detected (true/false)
+  --help, -h             Show this help screen
+
+DOCUMENTATION & SANDBOX:
+  https://query-guard.netlify.app/
+`);
+    process.exit(0);
+  }
+
   const isLintMode = process.argv.includes('--lint') || process.argv.includes('--lint-only');
   const config = resolveConfig();
 
