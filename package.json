@@ -1,5 +1,5 @@
 {
-  "name": "queryguard",
+  "name": "@queryguardhq/queryguard",
   "version": "1.2.0",
   "description": "Pre-merge PostgreSQL blast-radius and migration lock analyzer.",
   "main": "dist/index.js",
