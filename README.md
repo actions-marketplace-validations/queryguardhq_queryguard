@@ -1,8 +1,11 @@
+# 🛡️️ QueryGuard
+
+
 [![Marketplace](https://img.shields.io/badge/Marketplace-QueryGuard%20Sentinel-blue?logo=github)](https://github.com/marketplace/actions/queryguard-sentinel)
 [![npm version](https://img.shields.io/npm/v/@queryguardhq/queryguard.svg)](https://www.npmjs.com/package/@queryguardhq/queryguard)
 [![npm provenance](https://img.shields.io/badge/provenance-verified-brightgreen)](https://www.npmjs.com/package/@queryguardhq/queryguard)
-
-# 🛡️️ QueryGuard
+[![License: MIT](https://img.shields.io/badge/License-MIT-brightgreen.svg)](LICENSE)
+[![Live Sandbox](https://img.shields.io/badge/Web%20App-Live%20Sandbox-blueviolet)](https://query-guard.netlify.app/)
 
 [![GitHub release](https://img.shields.io/github/v/release/queryguardhq/queryguard?color=blue)](https://github.com/queryguardhq/queryguard/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
