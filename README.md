@@ -1,3 +1,7 @@
+[![Marketplace](https://img.shields.io/badge/Marketplace-QueryGuard%20Sentinel-blue?logo=github)](https://github.com/marketplace/actions/queryguard-sentinel)
+[![npm version](https://img.shields.io/npm/v/@queryguardhq/queryguard.svg)](https://www.npmjs.com/package/@queryguardhq/queryguard)
+[![npm provenance](https://img.shields.io/badge/provenance-verified-brightgreen)](https://www.npmjs.com/package/@queryguardhq/queryguard)
+
 # 🛡️️ QueryGuard
 
 [![GitHub release](https://img.shields.io/github/v/release/queryguardhq/queryguard?color=blue)](https://github.com/queryguardhq/queryguard/releases)
