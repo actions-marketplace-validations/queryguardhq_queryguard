@@ -1,4 +1,20 @@
-# Postgres 16 for the test suite. Uses 5433 so it never collides with a dev database on 5432.
+# Postgres servers for the test suite. Ports avoid 5432 so they never collide with a dev database.
+#   postgres  Postgres 16 on 5433: the migration lint, dry run and query-plan tests.
+#   pg14-18   Postgres 14-18 on 5414-5418 with pg_stat_statements preloaded: the snapshot tests.
+# GitHub service containers cannot pass server flags, so CI starts this same file.
+x-snapshot-server: &snapshot-server
+  environment:
+    POSTGRES_USER: postgres
+    POSTGRES_PASSWORD: postgres
+  # pg_stat_statements is shared by every test database on a server; a roomy limit keeps the suite
+  # from evicting entries mid-run (eviction is real behavior, but it would make refreshes differ).
+  command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements", "-c", "pg_stat_statements.track=top", "-c", "pg_stat_statements.max=20000"]
+  healthcheck:
+    test: ["CMD", "pg_isready", "-U", "postgres"]
+    interval: 2s
+    timeout: 3s
+    retries: 30
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -12,3 +28,24 @@ services:
       interval: 2s
       timeout: 3s
       retries: 15
+
+  pg14:
+    <<: *snapshot-server
+    image: postgres:14-alpine
+    ports: ["5414:5432"]
+  pg15:
+    <<: *snapshot-server
+    image: postgres:15-alpine
+    ports: ["5415:5432"]
+  pg16:
+    <<: *snapshot-server
+    image: postgres:16-alpine
+    ports: ["5416:5432"]
+  pg17:
+    <<: *snapshot-server
+    image: postgres:17-alpine
+    ports: ["5417:5432"]
+  pg18:
+    <<: *snapshot-server
+    image: postgres:18-alpine
+    ports: ["5418:5432"]
