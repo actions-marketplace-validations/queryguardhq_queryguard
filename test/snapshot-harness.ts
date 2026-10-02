@@ -178,6 +178,7 @@ export async function createFixture(version: number): Promise<Fixture> {
   };
 
   try {
+    let seedPid: number;
     const c = await connect();
     try {
       await c.query(`CREATE EXTENSION IF NOT EXISTS pg_stat_statements`);
@@ -242,10 +243,15 @@ export async function createFixture(version: number): Promise<Fixture> {
         `CREATE MATERIALIZED VIEW order_totals AS SELECT customer_id, sum(total) AS total FROM orders GROUP BY customer_id`
       );
       await c.query(`CREATE VIEW active_customers AS SELECT id, email FROM customers WHERE status = 'active'`);
-      // VACUUM as well, so autovacuum has no reason to change the tables while a test compares refreshes.
-      for (const t of ['customers', 'orders', 'events_2025', 'events_2026', 'order_totals']) await c.query(`VACUUM (ANALYZE) ${t}`);
-      await c.query(`ANALYZE events`);
+      seedPid = (await c.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+    } finally {
+      await c.end();
+    }
+    await settleStatistics(connect, seedPid);
 
+    const w = await connect();
+    try {
+      await w.query(`ANALYZE events`); // the partitioned parent's own (inherited) statistics
       // Simple-protocol texts: the server sees the literals and comments exactly as written.
       const workload = [
         `SELECT id FROM customers WHERE email = '${canaries.query_literal}'`,
@@ -257,11 +263,10 @@ export async function createFixture(version: number): Promise<Fixture> {
         // Views are not snapshot relations, so this reference stays unresolved.
         `SELECT count(*) FROM active_customers`,
       ];
-      for (let i = 0; i < 5; i++) for (const q of workload) await c.query(q);
+      for (let i = 0; i < 5; i++) for (const q of workload) await w.query(q);
     } finally {
-      await c.end();
+      await w.end();
     }
-    await waitForTableStats(connect);
   } catch (err) {
     await cleanup().catch(() => {});
     throw err;
@@ -287,24 +292,44 @@ export async function createFixture(version: number): Promise<Fixture> {
   };
 }
 
+/** Fixture tables whose statistics must be settled before any test compares snapshots. */
+const SETTLED_TABLES = ['customers', 'orders', 'events_2025', 'events_2026', 'order_totals'];
+
 /**
- * Cumulative stats reach other sessions asynchronously (on 14, through the stats collector); wait
- * until the fixture's inserts and its VACUUM ANALYZE are both visible.
+ * Brings the fixture's statistics to a state autovacuum has no reason to change, so two snapshots
+ * taken a few seconds apart see the same tables. Analyzing in the session that inserted the rows is
+ * not enough: its insert counts can be reported after the analyze (on 14-16 they are then counted
+ * twice), leaving modifications that make autovacuum re-analyze at an unpredictable moment. So:
+ * wait for the seeding session to exit, then VACUUM (ANALYZE) whatever is unsettled, from another
+ * session, until every table stays settled across two checks a second apart.
  */
-async function waitForTableStats(connect: () => Promise<Client>): Promise<void> {
+async function settleStatistics(connect: () => Promise<Client>, seedPid: number): Promise<void> {
   const c = await connect();
   try {
-    for (let i = 0; i < 100; i++) {
-      const { rows } = await c.query(
-        `SELECT coalesce(sum(n_tup_ins) FILTER (WHERE relname = 'customers'), 0)::int AS customers,
-                coalesce(sum(n_tup_ins) FILTER (WHERE relname = 'orders'), 0)::int AS orders,
-                count(*) FILTER (WHERE relname IN ('customers', 'orders') AND last_analyze IS NOT NULL)::int AS analyzed
-           FROM pg_stat_user_tables`
-      );
-      if (rows[0].customers >= 5000 && rows[0].orders >= 20000 && rows[0].analyzed === 2) return;
-      await new Promise((r) => setTimeout(r, 100));
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    for (let i = 0; (await c.query('SELECT 1 FROM pg_stat_activity WHERE pid = $1', [seedPid])).rows.length > 0; i++) {
+      if (i > 100) throw new Error('fixture seeding session never exited');
+      await sleep(100);
     }
-    throw new Error('fixture inserts and ANALYZE never appeared in pg_stat_user_tables');
+    let settledChecks = 0;
+    for (let attempt = 0; attempt < 30; attempt++) {
+      const { rows } = await c.query(
+        `SELECT relname FROM pg_stat_user_tables
+          WHERE relname = ANY($1) AND coalesce(last_analyze, last_autoanalyze) IS NOT NULL
+            AND n_mod_since_analyze = 0 AND n_ins_since_vacuum = 0`,
+        [SETTLED_TABLES]
+      );
+      const settled = new Set(rows.map((r) => r.relname));
+      const pending = SETTLED_TABLES.filter((t) => !settled.has(t));
+      if (pending.length === 0) {
+        if (++settledChecks === 2) return;
+      } else {
+        settledChecks = 0;
+        for (const t of pending) await c.query(`VACUUM (ANALYZE) ${t}`);
+      }
+      await sleep(1000);
+    }
+    throw new Error('fixture statistics never settled');
   } finally {
     await c.end();
   }

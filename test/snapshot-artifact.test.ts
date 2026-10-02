@@ -20,6 +20,16 @@ import { sig2 } from '../src/snapshot/format';
 const read = (dir: string, f: string) => fs.readFileSync(path.join(dir, f), 'utf8');
 const json = (dir: string, f: string) => JSON.parse(read(dir, f));
 
+/** Paths at which two JSON values differ, with both values. */
+function jsonDiff(a: unknown, b: unknown, at = ''): string[] {
+  if (JSON.stringify(a) === JSON.stringify(b)) return [];
+  if (a && b && typeof a === 'object' && typeof b === 'object') {
+    const keys = new Set([...Object.keys(a as object), ...Object.keys(b as object)]);
+    return [...keys].flatMap((k) => jsonDiff((a as any)[k], (b as any)[k], `${at}/${k}`));
+  }
+  return [`${at || '/'}: ${JSON.stringify(a)} → ${JSON.stringify(b)}`];
+}
+
 /** Every measurement in shape.json and workload.json, with its path. */
 function measurements(shape: any, workload: any): Array<[string, number]> {
   const out: Array<[string, number]> = [];
@@ -101,7 +111,13 @@ for (const version of SNAPSHOT_VERSIONS) {
       assert.ok([0, 2].includes(run('second').exitCode!));
       assert.ok([0, 2].includes(run('third').exitCode!));
       for (const f of ['schema.sql', 'shape.json', 'workload.json', 'redactions.json']) {
-        assert.equal(read(dir('third'), f), read(dir('second'), f), f);
+        const [x, y] = [read(dir('second'), f), read(dir('third'), f)];
+        if (x === y) continue;
+        // Say exactly what changed, so a failure here can be diagnosed from the CI log alone.
+        const diffs = f.endsWith('.json')
+          ? jsonDiff(JSON.parse(x), JSON.parse(y))
+          : [x.split('\n').findIndex((line, i) => line !== y.split('\n')[i])].map((i) => `line ${i + 1}: ${x.split('\n')[i]} → ${y.split('\n')[i]}`);
+        assert.fail(`${f} changed between two refreshes of an unchanged database:\n  ${diffs.slice(0, 20).join('\n  ')}`);
       }
       const [a, b] = [json(dir('second'), 'manifest.json'), json(dir('third'), 'manifest.json')];
       assert.notEqual(a.created_at, b.created_at);
