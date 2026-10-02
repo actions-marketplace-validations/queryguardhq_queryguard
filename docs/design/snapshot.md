@@ -1,6 +1,6 @@
 # Design: `queryguard snapshot` (Phase 1)
 
-**Status:** accepted 2026-10-02. The draft's open questions are settled under [Decisions](#decisions-2026-10-02).
+**Status:** accepted 2026-10-02 and implemented (Phase 1, items 1–8). The draft's open questions are settled under [Decisions](#decisions-2026-10-02). The reviewer-facing summary is [docs/snapshot-security.md](../snapshot-security.md).
 **Goal:** export the *shape* of a production database into a reviewable, committed artifact, so the PR Action can say what a migration touches on *your* production (approximate rows, size, traffic) without the PR workflow ever holding production credentials.
 
 Phase 1 does not change severities, add plan analysis or load statistics into the CI database. Those are later phases.
@@ -340,15 +340,18 @@ Counts and queryids only, never text. A reviewer can look up a redacted queryid 
   * Run as a least-privileged role (shape function, `--schema-from`, column grants on the allow-list only), the snapshot is PARTIAL until the grants exist and COMPLETE after.
   * The status canary appears only because its column is allow-listed, and every other canary stays absent.
 
-## Action consumption (item 7, summary)
+## Action consumption
 
-* **Inputs:** `snapshot-path` (default `''`, which means off) and `snapshot-max-age-days` (default `14`).
-* **Load:** check that the manifest hashes match the files, then validate against `schema/snapshot.v1.json`. Any failure adds a skipped item (`stage: 'snapshot'`), so the run is INCONCLUSIVE.
-* **Stale snapshot:** a warning line above everything else in the report.
-* **PARTIAL snapshot:** a warning plus "no data" on affected tables, never INCONCLUSIVE ([Decision 5](#decisions-2026-10-02)).
-* **Annotation:** each lock finding's `targetTable` is resolved by name parts. An unqualified name is tried as `public.<name>`; when the name exists in several schemas it is labelled ambiguous and not guessed. Example: `orders: ~48M rows · ~14 GB · 14 query shapes · ~2,100 calls/s (avg since 2026-09-01)`.
-* **Status and severity logic:** unchanged.
-* **Dependencies and network:** no network use. The snapshot is read from the checkout. JSON Schema validation uses `ajv`, pinned and bundled by `ncc` ([Decision 6](#decisions-2026-10-02)).
+* **Inputs:** `snapshot-path` (default `''`, which means off) and `snapshot-max-age-days` (default `14`); on the CLI, `--snapshot` and `--snapshot-max-age-days`.
+* **Load:** check that the manifest hashes match the files, then validate against `schema/snapshot.v1.json`. Any failure, including a missing directory or a non-positive max age, adds a skipped item (`stage: 'snapshot'`), so the run is INCONCLUSIVE.
+* **Stale snapshot:** a warning right under the status line.
+* **PARTIAL snapshot:** a warning with its reasons, never INCONCLUSIVE ([Decision 5](#decisions-2026-10-02)).
+* **Annotation:** each lock finding gets a "Production (snapshot)" column, e.g. `~48M rows · ~14 GB · 3 query shapes · ~2,100 calls/s`. The column appears only when a snapshot is given.
+  * Table names resolve with the workload's rules: a qualified name matches exactly; an unqualified name must exist in exactly one schema, otherwise it is reported as ambiguous and not guessed.
+  * A partitioned table sums its partitions' sizes and statements.
+  * Call rates average over the sample window, or from the `pg_stat_statements` reset to the snapshot. A line under the status says which.
+* **Status and severity logic:** unchanged. A test shows the same status and exit code with and without a snapshot.
+* **Network:** none. The snapshot is read from the checkout.
 
 ## Test plan highlights
 

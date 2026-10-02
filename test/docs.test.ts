@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'fs';
 import * as path from 'path';
+import { shapeFunctionSql } from './snapshot-harness';
 
 const ROOT = path.resolve(__dirname, '..');
 const read = (f: string) => fs.readFileSync(path.join(ROOT, f), 'utf8');
@@ -65,4 +66,39 @@ test('README makes no unmeasured latency or production-safety claims', () => {
     assert.match(read('.github/workflows/release.yml'), /npm publish --provenance/);
   }
   assert.match(readme, /not evidence of production safety/i);
+});
+
+// Phase 1 / item 8: snapshot docs stay true to the code and to the trust boundary.
+test('README and the security guide say the PR check never receives production credentials', () => {
+  assert.match(read('README.md'), /\*\*The PR check never receives production credentials\.\*\*/);
+  assert.match(read('docs/snapshot-security.md'), /Holds production credentials \| Yes: a dedicated read-only role \(below\) \| \*\*Never\.\*\*/);
+  assert.match(read('docs/examples/snapshot-refresh.yml'), /The QueryGuard PR check never receives them/);
+});
+
+test('the documented shape function and grants are the ones the tests run', () => {
+  const doc = read('docs/snapshot-security.md').replace(/\s+/g, ' ');
+  for (const sql of shapeFunctionSql('queryguard_snapshot')) {
+    assert.ok(doc.includes(`${sql.replace(/\s+/g, ' ')};`), `docs/snapshot-security.md is missing: ${sql.slice(0, 60)}`);
+  }
+});
+
+test('the example refresh workflow only runs on a schedule or by hand, with secrets in an environment', () => {
+  const wf = read('docs/examples/snapshot-refresh.yml');
+  const on = wf.split(/^on:\n/m)[1].split(/^\S/m)[0];
+  assert.deepEqual(on.match(/^  ([a-z_]+):/gm), ['  schedule:', '  workflow_dispatch:']);
+  assert.match(wf, /^    environment: production-snapshot$/m);
+  assert.match(wf, /PGPASSWORD: \$\{\{ secrets\.SNAPSHOT_PGPASSWORD \}\}/);
+  assert.match(wf, /@queryguardhq\/queryguard@\d+\.\d+\.\d+ snapshot/, 'pins an exact version');
+  // The README's PR-check example must not need database credentials.
+  const prExample = read('README.md').split('## Production snapshots')[1].split('```yaml')[1].split('```')[0];
+  assert.match(prExample, /snapshot-path: '\.queryguard\/snapshot'/);
+  assert.doesNotMatch(prExample, /PG(HOST|USER|PASSWORD)|pg-password/i);
+});
+
+test('relative links in the snapshot docs point at files that exist', () => {
+  for (const f of ['README.md', 'docs/snapshot-security.md', 'docs/design/snapshot.md']) {
+    for (const m of read(f).matchAll(/\]\(((?!https?:|#)[^)#\s]+)(#[^)]*)?\)/g)) {
+      assert.ok(fs.existsSync(path.join(ROOT, path.dirname(f), m[1])), `${f} links to missing ${m[1]}`);
+    }
+  }
 });

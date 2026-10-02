@@ -23,6 +23,7 @@
 | **1. Static linter** | Git pre-commit / local CLI | SQL tokenizer and pattern rules | None (no database) |
 | **2. AI agent guard** | Agent task completion | The same linter, invoked via instructions in `AGENTS.md` | None (no database) |
 | **3. CI PR check** | Pull request open / sync | Ephemeral Postgres 16, schema + migration + `EXPLAIN` | GitHub Actions runner with a Postgres service |
+| **4. Production snapshot** (optional) | A scheduled refresh, reviewed as a pull request | Read-only export of production's shape, committed to the repo; the PR check reads it | A job that can reach production (bastion or self-hosted runner) |
 
 ---
 
@@ -197,6 +198,74 @@ If your runner wraps each migration file in a transaction (Rails and Django do b
 
 ---
 
+## Production snapshots
+
+A lock finding says *what* a migration locks. A snapshot adds *how much that matters on your production database*. The finding's row in the PR comment gains a column like this:
+
+| Severity | Issue Type | Target Table | Production (snapshot) |
+| :--- | :--- | :--- | :--- |
+| 🚨 CRITICAL | `SHARE` Lock | `orders` | ~48M rows · ~14 GB · 3 query shapes · ~2,100 calls/s |
+
+The snapshot is a directory, `.queryguard/snapshot/`, committed to your repository:
+* production's schema (`pg_dump --schema-only`, scrubbed);
+* table and index sizes and activity counters;
+* each column's statistical shape (never its values);
+* the busiest normalized statements from `pg_stat_statements`.
+
+**The PR check never receives production credentials.** It only reads the committed directory. A separate job with production access refreshes the snapshot and proposes each refresh as a pull request, so every change to it is reviewed.
+
+**1. Create a read-only role for the snapshot.** [docs/snapshot-security.md](docs/snapshot-security.md#required-grants) has the grants, including a setup in which the role cannot read a single row.
+
+**2. Take a snapshot** wherever production is reachable. The connection comes from the standard libpq environment, never from arguments:
+
+```bash
+PGHOST=db.internal PGDATABASE=app PGUSER=queryguard_snapshot npx queryguard snapshot --label production
+```
+
+| Option | Meaning |
+| :--- | :--- |
+| `--label` | A name for the snapshot (required). Nothing in the snapshot comes from connection details. |
+| `--sample-window 5m` | Read `pg_stat_statements` twice, 5 minutes apart, so call rates reflect current traffic rather than an average since the last reset. |
+| `--top N` | Keep the top N statements by total time, plus the top N by calls (default 200). |
+| `--precision exact` | Do not round. By default every count, size and time is rounded to 2 significant figures. |
+| `--schema-from FILE` | Use a `pg_dump --schema-only` file made elsewhere, so the snapshot role needs no table access. |
+| `--mode full --allow-columns FILE` | PostgreSQL 18: also write `stats.sql`, the full planner statistics, with values only for the columns you list. |
+
+| Exit code | Meaning |
+| :--- | :--- |
+| `0` | COMPLETE. |
+| `2` | PARTIAL: written, but something could not be collected; `manifest.json` says what. |
+| `1` | Failed: nothing written, and any previous snapshot is untouched. |
+
+**3. Review and commit it.** `npx queryguard snapshot inspect` validates the snapshot (every file's SHA-256 and the [JSON Schema](schema/snapshot.v1.json)) and prints what is in it, including the full redaction report. The [security guide](docs/snapshot-security.md#how-to-review-a-snapshot-refresh) has a review checklist.
+
+**4. Point the PR check at it:**
+
+```yaml
+      - name: Run QueryGuard
+        uses: queryguardhq/queryguard@v1
+        with:
+          schema-path: 'db/schema.sql'
+          migration-path: 'db/migrations/latest.sql'
+          snapshot-path: '.queryguard/snapshot'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+```
+
+What the PR check does with it:
+* An invalid snapshot makes the run **INCONCLUSIVE**.
+* A snapshot older than `snapshot-max-age-days` (14 by default) gets a warning at the top of the report, and so does a PARTIAL one.
+* Severities and exit codes do not change.
+
+**5. Refresh it on a schedule.** [docs/examples/snapshot-refresh.yml](docs/examples/snapshot-refresh.yml) is a weekly workflow for a self-hosted runner that can reach production, and [docs/examples/snapshot-refresh.sh](docs/examples/snapshot-refresh.sh) does the same from a bastion's cron. Each opens a pull request with the refreshed snapshot.
+
+**What leaves production, and what never does.** [docs/snapshot-security.md](docs/snapshot-security.md) is written for your security reviewer. In short:
+* No row values in the default mode, and no host, user, password or database name.
+* Statement text keeps only `$n` placeholders: any text with a surviving literal is replaced.
+* A test plants unique strings in emails, names, statuses, JSON, comments and query literals on PostgreSQL 14 through 18, and fails if any reaches the snapshot.
+* Snapshots support PostgreSQL 14 and newer.
+
+---
+
 ## ⚙️ Action configuration parameters
 
 | Input parameter | Description | Default | Required |
@@ -226,14 +295,16 @@ If your runner wraps each migration file in a transaction (Rails and Django do b
 * **Runner requirements.** The Action runs on the Node 24 action runtime. GitHub-hosted runners are fine; self-hosted runners must be v2.327.1 or newer.
 * **Hand-written parsing.** Statements are split and recognized by a small tokenizer and pattern rules, not Postgres's own parser, so unusual syntax can be missed.
 * **Table-level view.** Plans come from planner estimates on generated data, with no production statistics, indexes or concurrency.
+* **Snapshots annotate, they do not judge.** Production context is shown next to lock findings but changes no severity. Statements that reach a table only through a view are not counted for that table. Unqualified table names that exist in several schemas are reported as ambiguous rather than guessed.
 
 ---
 
 ## 🔒 Data privacy
 
 * **Runs on your compute:** inside your existing GitHub Actions runner or on your machine.
-* **No third-party services:** QueryGuard makes no network calls except to the GitHub API, to post the PR comment when you pass `github-token`. Note that the comment and job summary contain your migration and query statements and table names, so they are as visible as the pull request.
-* **Synthetic rows only:** your data is never read. Rows are generated into an ephemeral database.
+* **No third-party services:** the PR check makes no network calls except to the GitHub API, to post the PR comment when you pass `github-token`, and `queryguard snapshot` connects only to the database you point it at. Note that the comment and job summary contain your migration and query statements and table names, so they are as visible as the pull request.
+* **Synthetic rows only in CI:** the PR check never reads your data. Rows are generated into an ephemeral database.
+* **Snapshots carry shape, not data:** see [Production snapshots](#production-snapshots) and [docs/snapshot-security.md](docs/snapshot-security.md).
 
 ---
 

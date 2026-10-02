@@ -1,0 +1,94 @@
+# Example: refresh the production snapshot every week and propose it as a pull request.
+#
+# Copy to .github/workflows/queryguard-snapshot-refresh.yml and adapt. This is the ONLY workflow
+# that holds production credentials. The QueryGuard PR check never receives them: it reads the
+# committed .queryguard/snapshot/ directory and nothing else.
+#
+# Guard rails, all of which matter:
+#   * Triggers are schedule and manual dispatch only, never pull_request, so code from a pull
+#     request never runs with these secrets.
+#   * The secrets live in a GitHub environment ("production-snapshot") whose deployment branches
+#     are restricted to the default branch, so a workflow edited on another branch cannot use them.
+#     Add required reviewers to the environment if you want a human to approve each run.
+#   * The job runs on a self-hosted runner that can reach the database (a bastion or a runner
+#     inside the network). Do not make that runner available to pull requests from forks.
+#   * The database role is the read-only role from docs/snapshot-security.md ("Required grants").
+#   * Pin an exact QueryGuard version, and review its changes before bumping it.
+#   * Consider a CODEOWNERS entry so security reviews every refresh:
+#       /.queryguard/snapshot/ @your-org/security
+#
+# The pull request this opens is created with GITHUB_TOKEN, so it does not trigger other
+# workflows by itself; push an empty commit or use a GitHub App token if you want the PR check
+# to run on it.
+name: Refresh production snapshot
+
+on:
+  schedule:
+    - cron: '0 6 * * 1' # Mondays, 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: queryguard-snapshot-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: [self-hosted, production-db-access]
+    environment: production-snapshot
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # The runner needs a pg_dump at least as new as the server, on PATH.
+      - name: Take the snapshot
+        env:
+          PGHOST: ${{ secrets.SNAPSHOT_PGHOST }}
+          PGPORT: ${{ secrets.SNAPSHOT_PGPORT }}
+          PGDATABASE: ${{ secrets.SNAPSHOT_PGDATABASE }}
+          PGUSER: ${{ secrets.SNAPSHOT_PGUSER }}
+          PGPASSWORD: ${{ secrets.SNAPSHOT_PGPASSWORD }}
+          PGSSLMODE: verify-full
+        run: |
+          set +e
+          npx --yes @queryguardhq/queryguard@1.4.0 snapshot --label production --sample-window 5m
+          code=$?
+          set -e
+          # 0 COMPLETE, 2 PARTIAL (still proposed; the reasons are in the PR), 1 failed (nothing written).
+          if [ "$code" -eq 1 ]; then exit 1; fi
+
+      - name: Summarize for the reviewer
+        run: |
+          {
+            echo '`queryguard snapshot inspect` for this refresh. Review checklist: docs/snapshot-security.md.'
+            echo
+            echo '```'
+            npx --yes @queryguardhq/queryguard@1.4.0 snapshot inspect .queryguard/snapshot || true
+            echo '```'
+          } > "$RUNNER_TEMP/inspect.md"
+          cat "$RUNNER_TEMP/inspect.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Open or update the pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE: ${{ github.event.repository.default_branch }}
+        run: |
+          branch=queryguard/snapshot-refresh
+          git switch -C "$branch"
+          git add .queryguard/snapshot
+          if git diff --cached --quiet; then
+            echo "Snapshot unchanged."
+            exit 0
+          fi
+          git -c user.name='queryguard-snapshot' -c user.email='queryguard-snapshot@users.noreply.github.com' \
+            commit -m "chore: refresh production snapshot ($(date -u +%F))"
+          git push --force origin "$branch"
+          gh pr create --base "$BASE" --head "$branch" --title 'Refresh production snapshot' --body-file "$RUNNER_TEMP/inspect.md" \
+            || gh pr edit "$branch" --body-file "$RUNNER_TEMP/inspect.md"
