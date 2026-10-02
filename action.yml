@@ -1,6 +1,6 @@
 name: 'QueryGuard Sentinel'
 author: 'Munir Pathak'
-description: 'Pre-merge PostgreSQL blast-radius and migration lock analyzer.'
+description: 'PostgreSQL migration lock linter and synthetic query-plan smoke test.'
 branding:
   icon: 'shield'
   color: 'blue'
@@ -43,7 +43,11 @@ inputs:
     required: false
     default: '2000'
   fail-on-sev1:
-    description: 'Block merge if a critical sequential scan or lock is detected'
+    description: 'Strict mode: fail the job on lock hazards (exit 1) or an INCONCLUSIVE run (exit 2). Sequential scans on synthetic data are informational and never fail the job.'
+    required: false
+    default: 'false'
+  assume-in-transaction:
+    description: 'Set to true if your migration runner wraps each file in a transaction (Rails and Django do by default). CREATE INDEX CONCURRENTLY is then flagged, and the migration is executed inside BEGIN/COMMIT.'
     required: false
     default: 'false'
   github-token:
@@ -52,5 +56,5 @@ inputs:
     default: ''
 
 runs:
-  using: 'node20'
+  using: 'node24'
   main: 'dist/index.js'
