@@ -55,6 +55,10 @@ test('AGENTS.md and the README template make CONCURRENTLY conditional on transac
 test('README makes no unmeasured latency or production-safety claims', () => {
   const readme = read('README.md');
   assert.doesNotMatch(readme, /<\s*20\s*ms|~\s*8\s*s\b/);
-  assert.doesNotMatch(readme, /provenance-verified|RDS|Aurora/);
+  assert.doesNotMatch(readme, /RDS|Aurora/);
+  // A provenance badge is only honest while releases are actually published with provenance.
+  if (/provenance/i.test(readme)) {
+    assert.match(read('.github/workflows/release.yml'), /npm publish --provenance/);
+  }
   assert.match(readme, /not evidence of production safety/i);
 });
