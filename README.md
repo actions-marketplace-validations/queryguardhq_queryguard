@@ -221,6 +221,7 @@ If your runner wraps each migration file in a transaction (Rails and Django do b
 * **Three rules only.** See [What it checks](#what-it-checks). No findings does not mean a migration is safe.
 * **Synthetic data is simple.** It generates rows for integer, text, numeric, UUID, JSON, timestamp and boolean columns. It cannot populate custom or enum types with `NOT NULL`, or generated columns. An `int` primary key or unique column with no default also fails, because the generator reuses small values. These tables are **skipped and reported**, making the run INCONCLUSIVE. Only tables in the `public` schema are populated.
 * **Needs a privileged Postgres role.** Generating rows sets `session_replication_role = 'replica'` to bypass foreign keys, which requires superuser (the default `postgres` user in the service container is). With a role that cannot do this, the run exits `1`.
+* **Runner requirements.** The Action runs on the Node 24 action runtime. GitHub-hosted runners are fine; self-hosted runners must be v2.327.1 or newer.
 * **Hand-written parsing.** Statements are split and recognized by a small tokenizer and pattern rules, not Postgres's own parser, so unusual syntax can be missed.
 * **Table-level view.** Plans come from planner estimates on generated data, with no production statistics, indexes or concurrency.
 

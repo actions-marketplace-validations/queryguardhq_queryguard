@@ -30,3 +30,8 @@ test('no other hard-coded copy of the version exists in src/', () => {
 test('package.json has the repository field npm provenance verifies', () => {
   assert.match(pkg.repository?.url ?? '', /github\.com\/queryguardhq\/queryguard/);
 });
+
+test('the Action runtime is node24, and CI tests the suite on it', () => {
+  assert.match(fs.readFileSync(path.join(ROOT, 'action.yml'), 'utf8'), /^\s+using: 'node24'$/m);
+  assert.match(fs.readFileSync(path.join(ROOT, '.github/workflows/test.yml'), 'utf8'), /node-version: \[20, 24\]/);
+});
