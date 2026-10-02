@@ -11,6 +11,7 @@ import { splitSqlStatements, splitSqlStatementsWithLines } from './splitter';
 import { analyzeDDLLocks } from './locks';
 import { seqScanRemediation } from './remediation';
 import { findReportComment, withMarker } from './comment';
+import { runSnapshot } from './snapshot/cli';
 
 export { splitSqlStatements, splitSqlStatementsWithLines, analyzeDDLLocks };
 
@@ -187,6 +188,11 @@ async function upsertGithubComment(token: string, report: string) {
 }
 
 async function run() {
+  if (process.argv[2] === 'snapshot') {
+    process.exitCode = await runSnapshot(process.argv.slice(3));
+    return;
+  }
+
   const showHelp = process.argv.includes('--help') || process.argv.includes('-h');
   const isGitHubAction = !!process.env.GITHUB_ACTIONS;
 
@@ -204,6 +210,9 @@ USAGE:
 
   # 2. Migration dry run + query-plan smoke test (Requires PostgreSQL)
   $ npx queryguard --schema <baseline.sql> --migration <new.sql> --queries <queries.sql>
+
+  # 3. Production shape snapshot (read-only; in development)
+  $ npx queryguard snapshot --help
 
 OPTIONS:
   --lint, --lint-only    Run the static lock rules on a migration file (no database)

@@ -7,14 +7,18 @@ import * as path from 'path';
 
 const ROOT = path.resolve(__dirname, '..');
 const read = (f: string) => fs.readFileSync(path.join(ROOT, f), 'utf8');
+/** Every file under src/, as a path relative to src/. */
+const sourceFiles = () =>
+  (fs.readdirSync(path.join(ROOT, 'src'), { recursive: true }) as string[]).filter((f) =>
+    fs.statSync(path.join(ROOT, 'src', f)).isFile()
+  );
 
 test('no "blast-radius" claims in shipped docs, metadata or user-facing text', () => {
   for (const f of ['README.md', 'AGENTS.md', 'package.json', 'action.yml', 'index.html']) {
     assert.doesNotMatch(read(f), /blast.?radius/i, f);
   }
   // The comment marker keeps its legacy name on purpose; nothing else in src/ may use the phrase.
-  const offenders = fs
-    .readdirSync(path.join(ROOT, 'src'))
+  const offenders = sourceFiles()
     .flatMap((f) => read(`src/${f}`).split('\n').filter((l) => /blast.?radius/i.test(l) && !l.includes('BOT_MARKER')));
   assert.deepEqual(offenders, []);
 });

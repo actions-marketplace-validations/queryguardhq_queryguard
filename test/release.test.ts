@@ -20,7 +20,8 @@ test('CLI help shows the version from package.json', () => {
 
 test('no other hard-coded copy of the version exists in src/', () => {
   const offenders: string[] = [];
-  for (const f of fs.readdirSync(path.join(ROOT, 'src'))) {
+  for (const f of fs.readdirSync(path.join(ROOT, 'src'), { recursive: true }) as string[]) {
+    if (!fs.statSync(path.join(ROOT, 'src', f)).isFile()) continue;
     const text = fs.readFileSync(path.join(ROOT, 'src', f), 'utf8');
     if (/\bv?\d+\.\d+\.\d+\b/.test(text.replace(/\$\{pkg\.version\}/g, ''))) offenders.push(f);
   }
