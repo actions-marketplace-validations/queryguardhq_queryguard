@@ -1,0 +1,92 @@
+# Tag-triggered release. DRAFT: review before relying on it.
+#
+#   1. Bump "version" in package.json, run `npm run build`, commit (dist/ embeds the version).
+#   2. git tag vX.Y.Z && git push origin vX.Y.Z
+#
+# Stable tags only (vX.Y.Z); pre-release tags do not match and never publish.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # npm provenance
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_PG_HOST: localhost
+      TEST_PG_PORT: 5432
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: 'https://registry.npmjs.org'
+          cache: npm
+
+      - name: Tag must match package.json
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $pkg"
+            exit 1
+          fi
+
+      - run: npm ci
+      - run: npm run typecheck
+
+      - name: Build and verify dist/ is committed and current
+        run: |
+          npm run build
+          if ! git diff --exit-code dist/ || [ -n "$(git ls-files --others --exclude-standard dist/)" ]; then
+            echo "::error title=dist/ is out of date::Rebuild, commit, and re-tag."
+            exit 1
+          fi
+
+      - run: npm test
+
+      - name: Publish to npm with provenance
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # Only after a successful publish: point the floating major tag (v1) at this release,
+  # so `uses: queryguardhq/queryguard@v1` picks up the verified dist/.
+  move-major-tag:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Move major tag
+        run: |
+          major="${GITHUB_REF_NAME%%.*}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f "$major" "$GITHUB_SHA"
+          git push --force origin "refs/tags/$major"
+          echo "Moved $major to $GITHUB_SHA"

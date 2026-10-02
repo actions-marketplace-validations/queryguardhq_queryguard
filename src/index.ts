@@ -1,11 +1,19 @@
 #!/usr/bin/env node
 import { Client } from 'pg';
+import pkg from '../package.json';
 import * as fs from 'fs';
 import * as path from 'path';
-import { Config, ExplainOutput, Finding, PlanNode } from './types';
+import { Config, ExplainOutput, Finding, PlanNode, RunOutcome, SkippedItem } from './types';
 import { buildMarkdownReport } from './reporter';
+import { computeStatus, EXIT_CODES } from './status';
+import { splitSqlStatements, splitSqlStatementsWithLines } from './splitter';
 
-const BOT_MARKER = '<!-- queryguard:blast-radius-report -->';
+import { analyzeDDLLocks } from './locks';
+import { seqScanRemediation } from './remediation';
+import { findReportComment, withMarker } from './comment';
+
+export { splitSqlStatements, splitSqlStatementsWithLines, analyzeDDLLocks };
+
 
 function getParam(flag: string, actionInputKey: string, fallback: string): string {
   const idx = process.argv.indexOf(flag);
@@ -14,6 +22,17 @@ function getParam(flag: string, actionInputKey: string, fallback: string): strin
   }
   const envKey = `INPUT_${actionInputKey.toUpperCase().replace(/-/g, '_')}`;
   return process.env[envKey] || fallback;
+}
+
+/** Boolean option: `--flag`, `--flag true|false`, or the INPUT_/env equivalent. */
+function getBool(flag: string, actionInputKey: string, envKey: string): boolean {
+  const idx = process.argv.indexOf(flag);
+  if (idx !== -1) {
+    const next = process.argv[idx + 1];
+    return next === undefined || next.startsWith('--') ? true : next === 'true';
+  }
+  const inputKey = `INPUT_${actionInputKey.toUpperCase().replace(/-/g, '_')}`;
+  return (process.env[envKey] || process.env[inputKey] || 'false') === 'true';
 }
 
 function resolveConfig(): Config {
@@ -29,161 +48,12 @@ function resolveConfig(): Config {
     mockRows: parseInt(process.env.MOCK_ROWS || getParam('--mock-rows', 'mock-rows', '2000'), 10),
     failOnSev1: (process.env.FAIL_ON_SEV1 || getParam('--fail-on-sev1', 'fail-on-sev1', 'false')) === 'true',
     githubToken: process.env.GITHUB_TOKEN || getParam('--token', 'github-token', ''),
+    assumeInTransaction: getBool('--assume-in-transaction', 'assume-in-transaction', 'ASSUME_IN_TRANSACTION'),
   };
 }
 
-function extractColumn(filterClause?: string): string | null {
-  if (!filterClause) return null;
-  const cleanFilter = filterClause.replace(/::[a-zA-Z0-9_ ]+/g, '');
-  const match = cleanFilter.match(/\(?([a-zA-Z_0-9]+)\)?\s*(=|>|<|>=|<=|~~|LIKE|IN)/i);
-  return match ? match[1] : null;
-}
-
-export function splitSqlStatements(sqlContent: string): string[] {
-  const statements: string[] = [];
-  let currentStmt = '';
-  let inSingleQuote = false;
-  let inDoubleQuote = false;
-  let inBlockComment = false;
-  let inLineComment = false;
-  let dollarTag: string | null = null;
-
-  const lines = sqlContent.split('\n');
-  const sanitizedLines = lines.filter(line => !line.trim().startsWith('\\'));
-  const fullText = sanitizedLines.join('\n');
-  const len = fullText.length;
-
-  for (let i = 0; i < len; i++) {
-    const char = fullText[i];
-    const nextChar = i + 1 < len ? fullText[i + 1] : '';
-
-    if (inLineComment) {
-      if (char === '\n') inLineComment = false;
-      continue;
-    }
-
-    if (inBlockComment) {
-      if (char === '*' && nextChar === '/') {
-        inBlockComment = false;
-        i++;
-      }
-      continue;
-    }
-
-    if (!inSingleQuote && !inDoubleQuote && !dollarTag) {
-      if (char === '-' && nextChar === '-') {
-        inLineComment = true;
-        i++;
-        continue;
-      }
-      if (char === '/' && nextChar === '*') {
-        inBlockComment = true;
-        i++;
-        continue;
-      }
-    }
-
-    if (char === "'" && !inDoubleQuote && !dollarTag) {
-      if (inSingleQuote && nextChar === "'") {
-        currentStmt += "''";
-        i++;
-        continue;
-      }
-      inSingleQuote = !inSingleQuote;
-      currentStmt += char;
-      continue;
-    }
-
-    if (char === '"' && !inSingleQuote && !dollarTag) {
-      inDoubleQuote = !inDoubleQuote;
-      currentStmt += char;
-      continue;
-    }
-
-    if (char === '$' && !inSingleQuote && !inDoubleQuote) {
-      if (dollarTag === null) {
-        const tagMatch = fullText.substring(i).match(/^(\$[a-zA-Z0-9_]*\$)/);
-        if (tagMatch) {
-          dollarTag = tagMatch[1];
-          currentStmt += dollarTag;
-          i += dollarTag.length - 1;
-          continue;
-        }
-      } else {
-        if (fullText.substring(i).startsWith(dollarTag)) {
-          currentStmt += dollarTag;
-          i += dollarTag.length - 1;
-          dollarTag = null;
-          continue;
-        }
-      }
-    }
-
-    if (char === ';' && !inSingleQuote && !inDoubleQuote && !dollarTag) {
-      const trimmed = currentStmt.trim();
-      if (trimmed.length > 0) {
-        statements.push(trimmed);
-      }
-      currentStmt = '';
-      continue;
-    }
-
-    currentStmt += char;
-  }
-
-  const finalTrimmed = currentStmt.trim();
-  if (finalTrimmed.length > 0) {
-    statements.push(finalTrimmed);
-  }
-
-  return statements;
-}
-
-export function analyzeDDLLocks(statements: string[]): Finding[] {
-  const findings: Finding[] = [];
-
-  for (const stmt of statements) {
-    const isCreateIndex = /^\s*CREATE\s+(UNIQUE\s+)?INDEX/i.test(stmt);
-    const hasConcurrently = /\bCONCURRENTLY\b/i.test(stmt);
-
-    if (isCreateIndex && !hasConcurrently) {
-      const match = stmt.match(/CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-zA-Z0-9_]+)\s+ON\s+(?:ONLY\s+)?([a-zA-Z0-9_]+)/i);
-      const indexName = match ? match[1] : 'idx_name';
-      const tableName = match ? match[2] : 'target_table';
-
-      findings.push({
-        query: stmt,
-        totalCost: 0,
-        hasSeqScan: false,
-        isLockRisk: true,
-        lockType: 'SHARE',
-        targetTable: tableName,
-        recommendation: `Use \`CREATE INDEX CONCURRENTLY ${indexName} ON${tableName} ...\` to prevent blocking writes.`,
-      });
-    }
-
-    const isAlterColumnType = /ALTER\s+TABLE\s+([a-zA-Z0-9_]+)\s+ALTER\s+COLUMN\s+([a-zA-Z0-9_]+)\s+(?:SET\s+DATA\s+)?TYPE/i.test(stmt);
-    if (isAlterColumnType) {
-      const match = stmt.match(/ALTER\s+TABLE\s+([a-zA-Z0-9_]+)\s+ALTER\s+COLUMN\s+([a-zA-Z0-9_]+)/i);
-      const tableName = match ? match[1] : 'target_table';
-      const columnName = match ? match[2] : 'col_name';
-
-      findings.push({
-        query: stmt,
-        totalCost: 0,
-        hasSeqScan: false,
-        isLockRisk: true,
-        lockType: 'ACCESS EXCLUSIVE',
-        targetTable: tableName,
-        recommendation: `Altering \`${tableName}.${columnName}\` type rewrites table and blocks all reads/writes.`,
-      });
-    }
-  }
-
-  return findings;
-}
-
-async function scaffoldSyntheticData(client: Client, sampleCount: number) {
+async function scaffoldSyntheticData(client: Client, sampleCount: number): Promise<SkippedItem[]> {
+  const skipped: SkippedItem[] = [];
   console.log(`[QueryGuard] Auto-scaffolding zero-PII synthetic rows (${sampleCount} rows/table)...`);
   await client.query(`SET session_replication_role = 'replica';`);
 
@@ -204,7 +74,10 @@ async function scaffoldSyntheticData(client: Client, sampleCount: number) {
           AND (column_default IS NULL OR (column_default NOT LIKE 'nextval%' AND column_default NOT LIKE 'gen_random_uuid%'));
       `, [table]);
 
-      if (colsRes.rows.length === 0) continue;
+      if (colsRes.rows.length === 0) {
+        skipped.push({ stage: 'synthetic-data', target: table, reason: 'no insertable columns (all defaulted); table left empty' });
+        continue;
+      }
 
       const colNames: string[] = [];
       const valGenerators: string[] = [];
@@ -245,11 +118,13 @@ async function scaffoldSyntheticData(client: Client, sampleCount: number) {
         console.log(`[QueryGuard] Injected and analyzed ${sampleCount} rows for table '${table}'.`);
       } catch (err: any) {
         console.warn(`[QueryGuard] Warning: Failed auto-scaffolding '${table}': ${err.message}`);
+        skipped.push({ stage: 'synthetic-data', target: table, reason: `could not generate rows: ${err.message}` });
       }
     }
   } finally {
     await client.query(`SET session_replication_role = 'origin';`);
   }
+  return skipped;
 }
 
 async function upsertGithubComment(token: string, report: string) {
@@ -267,7 +142,7 @@ async function upsertGithubComment(token: string, report: string) {
   }
 
   const commentsUrl = `https://api.github.com/repos/${repository}/issues/${prNumber}/comments`;
-  const bodyWithMarker = `${BOT_MARKER}\n${report}`;
+  const bodyWithMarker = withMarker(report);
   const headers = {
     'Authorization': `Bearer ${token}`,
     'Accept': 'application/vnd.github.v3+json',
@@ -280,9 +155,7 @@ async function upsertGithubComment(token: string, report: string) {
     let existingComment = null;
     if (listRes.ok) {
       const comments = await listRes.json();
-      existingComment = Array.isArray(comments)
-        ? comments.find((c: any) => c.body && c.body.includes(BOT_MARKER))
-        : null;
+      existingComment = findReportComment<{ id: number; body?: string | null }>(comments) ?? null;
     }
 
     if (existingComment) {
@@ -322,23 +195,26 @@ async function run() {
   // -------------------------------------------------------------
   if (showHelp || (!isGitHubAction && process.argv.length <= 2)) {
     console.log(`
-🛡️ QueryGuard Sentinel (v1.2.0)
-Automated PostgreSQL blast-radius analysis & migration lock sentinel.
+🛡️ QueryGuard Sentinel (v${pkg.version})
+PostgreSQL migration lock linter and synthetic query-plan smoke test.
 
 USAGE:
-  # 1. Static Linter Mode (Zero DB, < 20ms)
+  # 1. Static Linter Mode (no database)
   $ npx queryguard --lint --migration <path-to-sql-file>
 
-  # 2. Local Blast-Radius Runtime Check (Requires PostgreSQL)
+  # 2. Migration dry run + query-plan smoke test (Requires PostgreSQL)
   $ npx queryguard --schema <baseline.sql> --migration <new.sql> --queries <queries.sql>
 
 OPTIONS:
-  --lint, --lint-only    Run zero-dependency AST lock analysis on a migration file
+  --lint, --lint-only    Run the static lock rules on a migration file (no database)
   --migration            Path to incoming migration file(s) to evaluate for locks
   --schema               Path to baseline schema DDL (applied without lock checks)
-  --queries              Path to SQL queries evaluated for sequential scans
+  --queries              Path to SQL queries (EXPLAINed on synthetic data; informational)
+  --assume-in-transaction  Migration runner wraps each file in a transaction (Rails, Django);
+                         flags CREATE INDEX CONCURRENTLY and runs the migration in BEGIN/COMMIT
   --mock-rows            Row count generated for synthetic simulation (default: 2000)
-  --fail-on-sev1         Exit code 1 if critical lock or seq scan detected (true/false)
+  --fail-on-sev1         Strict mode (true/false): exit 1 on lock hazards or a failed migration,
+                         exit 2 if INCONCLUSIVE. Sequential scans never fail the build.
   --help, -h             Show this help screen
 
 DOCUMENTATION & SANDBOX:
@@ -362,7 +238,7 @@ DOCUMENTATION & SANDBOX:
 
     const rawSql = fs.readFileSync(path.resolve(targetFile), 'utf8');
     const statements = splitSqlStatements(rawSql);
-    const hazards = analyzeDDLLocks(statements);
+    const hazards = analyzeDDLLocks(statements, { assumeInTransaction: config.assumeInTransaction });
 
     if (hazards.length === 0) {
       console.log(`✅ [QueryGuard Lint] Clean: Evaluated ${statements.length} statement(s) in '${targetFile}'. Zero blocking migration locks detected.`);
@@ -370,9 +246,12 @@ DOCUMENTATION & SANDBOX:
     } else {
       console.error(`\n🚨 [QueryGuard Lint] Found ${hazards.length} dangerous migration lock hazard(s) in '${targetFile}':\n`);
       for (const h of hazards) {
-        console.error(`  • [${h.lockType}] Table: '${h.targetTable}'`);
+        console.error(`  • [${h.transactionHazard ? 'TRANSACTION' : h.lockType}] Table: '${h.targetTable}'`);
         console.error(`    Hazard: ${h.query}`);
-        console.error(`    Fix:    ${h.recommendation}\n`);
+        console.error(`    Fix:    ${h.recommendation}`);
+        for (const line of h.remediation?.sql ?? []) console.error(`            ${line.replace(/\n/g, '\n            ')}`);
+        for (const note of h.remediation?.notes ?? []) console.error(`    Note:   ${note}`);
+        console.error('');
       }
       process.exit(1);
     }
@@ -392,111 +271,144 @@ DOCUMENTATION & SANDBOX:
   console.log(`[QueryGuard] Connecting to database at ${config.pgHost}:${config.pgPort}/${config.pgDb}...`);
   await client.connect();
 
+  const outcome: RunOutcome = { lockFindings: [], scanFindings: [], skipped: [] };
   try {
-    if (config.schemaPath && fs.existsSync(config.schemaPath)) {
-      const resolvedSchema = path.resolve(config.schemaPath);
-      console.log(`[QueryGuard] Applying baseline schema (no lock gating): ${resolvedSchema}`);
-      const schemaStatements = splitSqlStatements(fs.readFileSync(resolvedSchema, 'utf8'));
-      for (const stmt of schemaStatements) {
-        try {
-          await client.query(stmt);
-        } catch (err: any) {
-          console.warn(`[QueryGuard] Warning: Failed executing baseline statement: "${stmt.substring(0, 40)}..." -> ${err.message}`);
-        }
-      }
-    }
-
-    const lockFindings: Finding[] = [];
-    if (config.migrationPath && fs.existsSync(config.migrationPath)) {
-      const resolvedMigration = path.resolve(config.migrationPath);
-      console.log(`[QueryGuard] Analyzing incoming migration for locks: ${resolvedMigration}`);
-      const migrationStatements = splitSqlStatements(fs.readFileSync(resolvedMigration, 'utf8'));
-      
-      const hazards = analyzeDDLLocks(migrationStatements);
-      lockFindings.push(...hazards);
-      console.log(`[QueryGuard] Detected ${hazards.length} migration lock hazard(s) in incoming migration.`);
-
-      for (const stmt of migrationStatements) {
-        try {
-          await client.query(stmt);
-        } catch (err: any) {
-          console.warn(`[QueryGuard] Warning: Failed applying migration statement: "${stmt.substring(0, 40)}..." -> ${err.message}`);
-        }
-      }
-    }
-
-    await scaffoldSyntheticData(client, config.mockRows);
-
-    const resolvedQueries = path.resolve(config.queriesPath);
-    console.log(`[QueryGuard] Evaluating queries: ${resolvedQueries}`);
-    const queryStatements = splitSqlStatements(fs.readFileSync(resolvedQueries, 'utf8'));
-
-    const scanFindings: Finding[] = [];
-
-    for (const sql of queryStatements) {
-      try {
-        const res = await client.query(`EXPLAIN (FORMAT JSON) ${sql}`);
-        const plan: ExplainOutput = res.rows[0]['QUERY PLAN'][0];
-
-        const seqScanNodes: PlanNode[] = [];
-
-        function walkPlan(node: PlanNode) {
-          if (node['Node Type'] === 'Seq Scan' && (node['Filter'] || node['Plan Rows'] > 100)) {
-            seqScanNodes.push(node);
-          }
-          if (node.Plans) {
-            node.Plans.forEach(walkPlan);
-          }
-        }
-
-        walkPlan(plan.Plan);
-
-        if (seqScanNodes.length === 0) {
-          scanFindings.push({
-            query: sql,
-            totalCost: plan.Plan['Total Cost'],
-            hasSeqScan: false,
-          });
-        } else {
-          for (const node of seqScanNodes) {
-            const table = node['Relation Name'] || 'unknown';
-            const col = extractColumn(node['Filter']);
-            const indexSql = col 
-              ? `CREATE INDEX CONCURRENTLY idx_${table}_${col} ON ${table}(${col});`
-              : `CREATE INDEX CONCURRENTLY idx_${table}_scan ON ${table}(/* columns */);`;
-
-            scanFindings.push({
-              query: sql,
-              totalCost: plan.Plan['Total Cost'],
-              hasSeqScan: true,
-              targetTable: table,
-              impactedRows: node['Plan Rows'],
-              filterClause: node['Filter'],
-              recommendation: indexSql,
-            });
-          }
-        }
-      } catch (err: any) {
-        console.warn(`[QueryGuard] Warning: Query execution error on "${sql}": ${err.message}`);
-      }
-    }
-
-    const allFindings = [...lockFindings, ...scanFindings];
-    const reportMarkdown = buildMarkdownReport(allFindings);
-    fs.writeFileSync('queryguard-report.md', reportMarkdown);
-    console.log('\n' + reportMarkdown);
-
-    if (config.githubToken) {
-      await upsertGithubComment(config.githubToken, reportMarkdown);
-    }
-
-    const criticalIssues = allFindings.filter(f => f.hasSeqScan || f.isLockRisk);
-    if (criticalIssues.length > 0 && config.failOnSev1) {
-      console.error(`\n[QueryGuard] CI GATING FAILURE: Detected ${criticalIssues.length} critical database risk(s).`);
-      process.exit(1);
-    }
+    await execute(client, config, outcome);
   } finally {
     await client.end();
+  }
+
+  const status = computeStatus(outcome);
+  const reportMarkdown = buildMarkdownReport(outcome);
+  fs.writeFileSync('queryguard-report.md', reportMarkdown);
+  console.log('\n' + reportMarkdown);
+  console.log(`[QueryGuard] Status: ${status}`);
+
+  const summaryPath = process.env.GITHUB_STEP_SUMMARY;
+  if (summaryPath) {
+    try {
+      fs.appendFileSync(summaryPath, reportMarkdown + '\n');
+    } catch (err: any) {
+      console.error(`[QueryGuard] Could not write job summary: ${err.message}`);
+    }
+  }
+
+  if (config.githubToken) {
+    await upsertGithubComment(config.githubToken, reportMarkdown);
+  }
+
+  // Advisory mode never fails the job on findings; the report still leads with the status.
+  if (config.failOnSev1 && status !== 'PASS') {
+    console.error(`\n[QueryGuard] CI GATING ${status === 'FAIL' ? 'FAILURE' : 'INCONCLUSIVE'}: status ${status} (exit ${EXIT_CODES[status]}).`);
+  }
+  process.exitCode = config.failOnSev1 ? EXIT_CODES[status] : 0;
+}
+
+/** Runs baseline, migration, synthetic data and EXPLAIN, filling `out`. Stops early on baseline/migration failure. */
+async function execute(client: Client, config: Config, out: RunOutcome): Promise<void> {
+  if (config.schemaPath) {
+    const resolvedSchema = path.resolve(config.schemaPath);
+    if (!fs.existsSync(resolvedSchema)) {
+      out.skipped.push({ stage: 'baseline', target: config.schemaPath, reason: 'schema file not found; baseline state not built' });
+      return;
+    }
+    console.log(`[QueryGuard] Applying baseline schema (no lock gating): ${resolvedSchema}`);
+    for (const { sql, line } of splitSqlStatementsWithLines(fs.readFileSync(resolvedSchema, 'utf8'))) {
+      try {
+        await client.query(sql);
+      } catch (err: any) {
+        console.error(`[QueryGuard] Baseline statement failed at line ${line}: ${err.message}`);
+        out.baselineFailure = { stage: 'baseline', statement: sql, line, message: err.message };
+        return;
+      }
+    }
+  }
+
+  if (config.migrationPath) {
+    const resolvedMigration = path.resolve(config.migrationPath);
+    if (!fs.existsSync(resolvedMigration)) {
+      out.skipped.push({ stage: 'migration', target: config.migrationPath, reason: 'migration file not found' });
+      return;
+    }
+    console.log(`[QueryGuard] Analyzing incoming migration for locks: ${resolvedMigration}`);
+    const migrationStatements = splitSqlStatementsWithLines(fs.readFileSync(resolvedMigration, 'utf8'));
+
+    const hazards = analyzeDDLLocks(migrationStatements.map(s => s.sql), { assumeInTransaction: config.assumeInTransaction });
+    out.lockFindings.push(...hazards);
+    console.log(`[QueryGuard] Detected ${hazards.length} migration lock hazard(s) in incoming migration.`);
+
+    // Runners that wrap each file in a transaction hit transaction-only errors in production,
+    // so reproduce that here to surface the real Postgres error.
+    if (config.assumeInTransaction) {
+      out.assumedTransaction = true;
+      await client.query('BEGIN');
+    }
+    for (const { sql, line } of migrationStatements) {
+      try {
+        await client.query(sql);
+      } catch (err: any) {
+        console.error(`[QueryGuard] Migration statement failed at line ${line}: ${err.message}`);
+        out.migrationFailure = { stage: 'migration', statement: sql, line, message: err.message };
+        if (config.assumeInTransaction) await client.query('ROLLBACK').catch(() => {});
+        return;
+      }
+    }
+    if (config.assumeInTransaction) await client.query('COMMIT');
+  }
+
+  out.skipped.push(...(await scaffoldSyntheticData(client, config.mockRows)));
+
+  out.queriesEvaluatedOn = config.mockRows;
+
+  const resolvedQueries = path.resolve(config.queriesPath);
+  console.log(`[QueryGuard] Evaluating queries: ${resolvedQueries}`);
+  const queryStatements = splitSqlStatementsWithLines(fs.readFileSync(resolvedQueries, 'utf8'));
+
+  for (const { sql, line } of queryStatements) {
+    try {
+      const res = await client.query(`EXPLAIN (FORMAT JSON) ${sql}`);
+      const plan: ExplainOutput = res.rows[0]['QUERY PLAN'][0];
+
+      const seqScanNodes: PlanNode[] = [];
+
+      function walkPlan(node: PlanNode) {
+        if (node['Node Type'] === 'Seq Scan' && (node['Filter'] || node['Plan Rows'] > 100)) {
+          seqScanNodes.push(node);
+        }
+        if (node.Plans) {
+          node.Plans.forEach(walkPlan);
+        }
+      }
+
+      walkPlan(plan.Plan);
+
+      if (seqScanNodes.length === 0) {
+        out.scanFindings.push({
+          query: sql,
+          totalCost: plan.Plan['Total Cost'],
+          hasSeqScan: false,
+        });
+      } else {
+        for (const node of seqScanNodes) {
+          const table = node['Relation Name'] || 'unknown';
+          const remediation = await seqScanRemediation(client, node);
+
+          out.scanFindings.push({
+            query: sql,
+            totalCost: plan.Plan['Total Cost'],
+            hasSeqScan: true,
+            targetTable: table,
+            impactedRows: node['Plan Rows'],
+            filterClause: node['Filter'],
+            recommendation: remediation.summary,
+            remediation,
+          });
+        }
+      }
+    } catch (err: any) {
+      console.warn(`[QueryGuard] Warning: EXPLAIN failed on "${sql}": ${err.message}`);
+      out.skipped.push({ stage: 'explain', target: sql, line, reason: err.message });
+    }
   }
 }
 

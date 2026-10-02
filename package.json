@@ -1,7 +1,7 @@
 {
   "name": "@queryguardhq/queryguard",
-  "version": "1.2.3",
-  "description": "Pre-merge PostgreSQL blast-radius and migration lock analyzer.",
+  "version": "1.3.0",
+  "description": "PostgreSQL migration lock linter and synthetic query-plan smoke test.",
   "main": "dist/index.js",
   "bin": {
     "queryguard": "dist/index.js"
@@ -16,7 +16,12 @@
   "scripts": {
     "build": "ncc build src/index.ts -o dist --minify --license licenses.txt",
     "lint:sql": "node dist/index.js --lint",
-    "test:local": "node dist/index.js --schema test/baseline_dump.sql --migration test/new_migration.sql --queries test/queries.sql"
+    "test:local": "node dist/index.js --schema test/baseline_dump.sql --migration test/new_migration.sql --queries test/queries.sql",
+    "test": "node --import tsx --test test/*.test.ts",
+    "test:db:up": "docker compose -f docker-compose.test.yml up -d --wait",
+    "test:db:down": "docker compose -f docker-compose.test.yml down",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build && git diff --exit-code dist/"
   },
   "keywords": [
     "postgres",
@@ -28,6 +33,14 @@
   ],
   "author": "Munir Pathak",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/queryguardhq/queryguard.git"
+  },
+  "homepage": "https://github.com/queryguardhq/queryguard#readme",
+  "bugs": {
+    "url": "https://github.com/queryguardhq/queryguard/issues"
+  },
   "dependencies": {
     "pg": "^8.11.3"
   },
@@ -35,6 +48,7 @@
     "@types/node": "^20.11.0",
     "@types/pg": "^8.11.0",
     "@vercel/ncc": "^0.38.4",
+    "tsx": "^4.23.15",
     "typescript": "^5.3.3"
   }
 }
