@@ -44,7 +44,7 @@ export function rate(perSecond: number): string {
 export function age(from: string, now: Date): string {
   const s = Math.max(0, (now.getTime() - Date.parse(from)) / 1000);
   if (s < 90) return 'just now';
-  const [n, unit] = s < 5400 ? [s / 60, 'minute'] : s < 129_600 ? [s / 3600, 'hour'] : [s / 86_400, 'day'];
+  const [n, unit] = s < 5400 ? [s / 60, 'minute'] : s < 79_200 ? [s / 3600, 'hour'] : [s / 86_400, 'day'];
   const r = Math.round(n);
   return `${r} ${unit}${r === 1 ? '' : 's'} ago`;
 }

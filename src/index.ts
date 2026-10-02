@@ -12,6 +12,7 @@ import { analyzeDDLLocks } from './locks';
 import { seqScanRemediation } from './remediation';
 import { findReportComment, withMarker } from './comment';
 import { runSnapshot } from './snapshot/cli';
+import { describeTable, loadForAction } from './snapshot/annotate';
 
 export { splitSqlStatements, splitSqlStatementsWithLines, analyzeDDLLocks };
 
@@ -50,7 +51,24 @@ function resolveConfig(): Config {
     failOnSev1: (process.env.FAIL_ON_SEV1 || getParam('--fail-on-sev1', 'fail-on-sev1', 'false')) === 'true',
     githubToken: process.env.GITHUB_TOKEN || getParam('--token', 'github-token', ''),
     assumeInTransaction: getBool('--assume-in-transaction', 'assume-in-transaction', 'ASSUME_IN_TRANSACTION'),
+    snapshotPath: getParam('--snapshot', 'snapshot-path', ''),
+    snapshotMaxAgeDays: getParam('--snapshot-max-age-days', 'snapshot-max-age-days', '14'),
   };
+}
+
+/**
+ * Annotates lock findings with production context from the snapshot. An unusable snapshot makes
+ * the run INCONCLUSIVE; annotations never change a severity.
+ */
+function applySnapshot(config: Config, out: RunOutcome): void {
+  if (!config.snapshotPath) return;
+  const loaded = loadForAction(config.snapshotPath, config.snapshotMaxAgeDays);
+  if (!loaded.ok) {
+    out.skipped.push({ stage: 'snapshot', target: config.snapshotPath, reason: loaded.reason });
+    return;
+  }
+  out.snapshot = loaded.context;
+  for (const f of out.lockFindings) f.productionContext = describeTable(loaded.snapshot, f.targetTable ?? '');
 }
 
 async function scaffoldSyntheticData(client: Client, sampleCount: number): Promise<SkippedItem[]> {
@@ -224,6 +242,9 @@ OPTIONS:
   --mock-rows            Row count generated for synthetic simulation (default: 2000)
   --fail-on-sev1         Strict mode (true/false): exit 1 on lock hazards or a failed migration,
                          exit 2 if INCONCLUSIVE. Sequential scans never fail the build.
+  --snapshot             A 'queryguard snapshot' directory: annotate lock findings with production
+                         rows, size and traffic. An invalid snapshot makes the run INCONCLUSIVE.
+  --snapshot-max-age-days  Warn when the snapshot is older than this (default: 14)
   --help, -h             Show this help screen
 
 DOCUMENTATION & SANDBOX:
@@ -286,6 +307,7 @@ DOCUMENTATION & SANDBOX:
   } finally {
     await client.end();
   }
+  applySnapshot(config, outcome);
 
   const status = computeStatus(outcome);
   const reportMarkdown = buildMarkdownReport(outcome);

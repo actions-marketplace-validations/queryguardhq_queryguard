@@ -1,3 +1,5 @@
+import type { SnapshotContext } from './snapshot/annotate';
+
 export interface Config {
   schemaPath?: string;
   migrationPath?: string;
@@ -12,6 +14,10 @@ export interface Config {
   githubToken: string;
   /** The migration runner wraps each file in a transaction (Rails, Django, ...). */
   assumeInTransaction: boolean;
+  /** A `queryguard snapshot` directory; lock findings are annotated from it. */
+  snapshotPath: string;
+  /** Raw input; a snapshot older than this many days is reported as stale. */
+  snapshotMaxAgeDays: string;
 }
 
 export interface PlanNode {
@@ -42,6 +48,8 @@ export interface Finding {
   /** One-line summary of the suggested fix (no SQL). */
   recommendation?: string;
   remediation?: Remediation;
+  /** Production context from the snapshot, e.g. "~48M rows · ~14 GB · 3 query shapes · ~2,100 calls/s". Informational. */
+  productionContext?: string;
 }
 
 /** A suggested fix. Every entry in `sql` is complete, executable SQL. */
@@ -53,7 +61,7 @@ export interface Remediation {
 
 export type Status = 'PASS' | 'FAIL' | 'INCONCLUSIVE';
 
-export type Stage = 'baseline' | 'migration' | 'synthetic-data' | 'explain';
+export type Stage = 'baseline' | 'migration' | 'synthetic-data' | 'explain' | 'snapshot';
 
 /** A statement that failed against Postgres. */
 export interface StatementError {
@@ -91,4 +99,6 @@ export interface RunOutcome {
   baselineFailure?: StatementError;
   /** A migration statement failed; the run stopped there. */
   migrationFailure?: StatementError;
+  /** The production snapshot the findings were annotated from, when one was given and valid. */
+  snapshot?: SnapshotContext;
 }

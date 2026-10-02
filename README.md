@@ -207,6 +207,8 @@ If your runner wraps each migration file in a transaction (Rails and Django do b
 | `fail-on-sev1` | Strict mode: exit `1` on FAIL and `2` on INCONCLUSIVE. Sequential scans never fail the job. In advisory mode (`false`) the job always passes. | `'false'` | No |
 | `assume-in-transaction` | Set to `'true'` if your runner wraps each migration file in a transaction. See [Transactions](#transactions-and-concurrently). | `'false'` | No |
 | `mock-rows` | Synthetic rows generated per table for the query-plan smoke test. | `'2000'` | No |
+| `snapshot-path` | A `queryguard snapshot` directory committed to the repo (see [Production snapshots](#production-snapshots)). Lock findings are annotated with production row counts, sizes and traffic; severities do not change. An invalid snapshot makes the run INCONCLUSIVE. | `''` | No |
+| `snapshot-max-age-days` | A snapshot older than this many days gets a stale warning at the top of the report. | `'14'` | No |
 | `github-token` | GitHub token for posting and updating the PR comment in place. | `''` | No |
 | `pg-host` | PostgreSQL host. | `'localhost'` | No |
 | `pg-port` | PostgreSQL port. | `'5432'` | No |

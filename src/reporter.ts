@@ -1,5 +1,6 @@
 import { Finding, RunOutcome, SkippedItem, StatementError, Status } from './types';
 import { computeStatus, failsGate } from './status';
+import { age } from './snapshot/display';
 
 function cell(text: string): string {
   return text.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
@@ -52,20 +53,42 @@ function skippedTable(items: SkippedItem[]): string {
   return md + `\n`;
 }
 
-function lockRows(findings: Finding[]): string {
-  let md = `| Severity | Issue Type | Target Table | Impact | Suggested Fix |\n`;
-  md += `| :--- | :--- | :--- | :--- | :--- |\n`;
+function lockRows(findings: Finding[], withProduction: boolean): string {
+  const prod = (f: Finding) => (withProduction ? ` ${cell(f.productionContext || '')} |` : '');
+  let md = `| Severity | Issue Type | Target Table |${withProduction ? ' Production (snapshot) |' : ''} Impact | Suggested Fix |\n`;
+  md += `| :--- | :--- | :--- |${withProduction ? ' :--- |' : ''} :--- | :--- |\n`;
   for (const f of findings) {
     if (f.transactionHazard) {
-      md += `| 🚨 CRITICAL | \`CONCURRENTLY\` in a transaction | \`${cell(f.targetTable || 'unknown')}\` | Fails at deploy: \`CREATE INDEX CONCURRENTLY\` cannot run inside a transaction block | ${cell(f.recommendation || '')} |\n`;
+      md += `| 🚨 CRITICAL | \`CONCURRENTLY\` in a transaction | \`${cell(f.targetTable || 'unknown')}\` |${prod(f)} Fails at deploy: \`CREATE INDEX CONCURRENTLY\` cannot run inside a transaction block | ${cell(f.recommendation || '')} |\n`;
       continue;
     }
     const blastDesc =
       f.lockType === 'ACCESS EXCLUSIVE'
         ? 'Forces table rewrite; blocks all reads and writes'
         : 'Blocks concurrent table writes (`INSERT`/`UPDATE`/`DELETE`)';
-    md += `| 🚨 CRITICAL | \`${f.lockType}\` Lock | \`${cell(f.targetTable || 'unknown')}\` | ${blastDesc} | ${cell(f.recommendation || '')} |\n`;
+    md += `| 🚨 CRITICAL | \`${f.lockType}\` Lock | \`${cell(f.targetTable || 'unknown')}\` |${prod(f)} ${blastDesc} | ${cell(f.recommendation || '')} |\n`;
   }
+  return md;
+}
+
+/** Warnings about the snapshot itself, right under the status, then one line saying where the figures come from. */
+function snapshotBlock(o: RunOutcome, now: Date): string {
+  const s = o.snapshot;
+  if (!s) return '';
+  let md = '';
+  if (s.stale) {
+    md +=
+      `> ⚠️ **Stale snapshot:** \`${s.label}\` was taken ${age(s.createdAt, now)}, more than \`snapshot-max-age-days\` (${s.maxAgeDays}). ` +
+      `Production may have changed since; refresh it.\n\n`;
+  }
+  if (s.status === 'PARTIAL') {
+    md += `> ⚠️ **Partial snapshot:** \`${s.label}\` is missing some production context:\n`;
+    for (const r of s.partialReasons) md += `> - ${r.replace(/\r?\n/g, ' ')}\n`;
+    md += `\n`;
+  }
+  md +=
+    `*Production context from snapshot \`${s.label}\` (${s.server}, taken ${s.createdAt.slice(0, 10)}, ${age(s.createdAt, now)}). ` +
+    `Figures are approximate; call rates are the ${s.window}. They do not change any severity.*\n\n`;
   return md;
 }
 
@@ -98,6 +121,7 @@ export function buildMarkdownReport(o: RunOutcome, now: Date = new Date()): stri
 
   let md = `## 🛡️ QueryGuard Report\n\n`;
   md += statusHeadline(status, o);
+  md += snapshotBlock(o, now);
   md += `*Last evaluated: \`${timestamp}\`*\n\n`;
   if (o.assumedTransaction) {
     md += `*Assuming the migration runner wraps the file in a transaction (\`assume-in-transaction\`).*\n\n`;
@@ -108,7 +132,7 @@ export function buildMarkdownReport(o: RunOutcome, now: Date = new Date()): stri
   if (o.skipped.length > 0) md += skippedTable(o.skipped);
 
   if (locks.length > 0) {
-    md += `### Migration findings\n\n${lockRows(locks)}\n${fixesSection(locks)}`;
+    md += `### Migration findings\n\n${lockRows(locks, !!o.snapshot)}\n${fixesSection(locks)}`;
     md += `<details><summary><b>View Impacted Statements</b></summary>\n\n`;
     for (const f of locks) md += `\`\`\`sql\n${f.query}\n\`\`\`\n`;
     md += `</details>\n\n`;
