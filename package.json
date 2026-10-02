@@ -1,7 +1,7 @@
 {
   "name": "@queryguardhq/queryguard",
   "version": "1.2.3",
-  "description": "Pre-merge PostgreSQL blast-radius and migration lock analyzer.",
+  "description": "PostgreSQL migration lock linter and synthetic query-plan smoke test.",
   "main": "dist/index.js",
   "bin": {
     "queryguard": "dist/index.js"

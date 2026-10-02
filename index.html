@@ -59,11 +59,11 @@
   <div class="container">
     <header>
       <div>
-        <h1>🛡️ QueryGuard Sentinel <span class="badge">v1.2.0 Live</span></h1>
-        <p style="margin-top: 0.25rem;">Automated PostgreSQL blast-radius analysis & table-locking migration sentinel.</p>
+        <h1>🛡️ QueryGuard Sentinel <span class="badge">Preview</span></h1>
+        <p style="margin-top: 0.25rem;">PostgreSQL migration lock linter and synthetic query-plan smoke test.</p>
       </div>
       <div>
-        <a href="https://github.com/queryguardhq/queryguard" target="_blank" style="color: var(--accent); text-decoration: none; font-size: 0.85rem; font-weight: 500;">GitHub Repository (v1.2.0) →</a>
+        <a href="https://github.com/queryguardhq/queryguard" target="_blank" style="color: var(--accent); text-decoration: none; font-size: 0.85rem; font-weight: 500;">GitHub Repository →</a>
       </div>
     </header>
 
@@ -79,27 +79,28 @@
     <div id="simulator" class="tab-content active">
       <div class="grid">
         <div class="panel">
-          <label for="ddlInput">Incoming Migration DDL (Evaluated for SHARE & ACCESS EXCLUSIVE)</label>
+          <label for="ddlInput">Incoming Migration DDL (checked against the lock rules)</label>
           <textarea id="ddlInput" rows="7">-- Non-concurrent index acquires SHARE lock:
 CREATE INDEX idx_users_status ON users(status);
 
 -- In-place type alter acquires ACCESS EXCLUSIVE lock:
 -- ALTER TABLE users ALTER COLUMN status TYPE TEXT;</textarea>
 
-          <label for="queryInput">Application Queries (Evaluated Against Scaffolding)</label>
-          <textarea id="queryInput" rows="5">-- Unindexed lookup triggers Seq Scan:
+          <label for="queryInput">Application Queries (heuristic preview; the Action runs EXPLAIN)</label>
+          <textarea id="queryInput" rows="5">-- A filter on an unindexed column may sequentially scan:
 SELECT * FROM users WHERE email = 'target@company.com';</textarea>
 
-          <button class="btn" onclick="runClientSimulation()">Evaluate Blast Radius</button>
+          <button class="btn" onclick="runClientSimulation()">Run checks</button>
         </div>
 
         <div class="panel">
-          <label>Simulated PR Bot Output (Live Preview)</label>
+          <label>PR comment preview (simplified, in your browser)</label>
           <div id="simulationOutput" class="report-card">
-            <p style="color: #8b949e; font-size: 0.85rem;">Click <b>Evaluate Blast Radius</b> to test your SQL against the client-side parsing engine.</p>
+            <p style="color: #8b949e; font-size: 0.85rem;">Click <b>Run checks</b> to preview the report.</p>
           </div>
         </div>
       </div>
+      <p style="margin-top: 1rem;">This preview runs a <b>simplified</b> version of the rules in your browser. It does not connect to a database, so it cannot apply your migration, report a statement that fails, or run <code>EXPLAIN</code>. The CLI and the GitHub Action are more thorough.</p>
     </div>
 
     <!-- TAB 2: LOCAL LINTER & PRE-COMMIT -->
@@ -107,7 +108,7 @@ SELECT * FROM users WHERE email = 'target@company.com';</textarea>
       <div class="panel">
         <div class="feature-card">
           <h3>Zero-Dependency Static DDL Linter</h3>
-          <p>Runs locally in under <b>20 milliseconds</b> without requiring a database connection, Docker container, or credentials. Evaluates AST locks instantly on developer laptops or inside git hooks.</p>
+          <p>Runs locally without a database connection, Docker container, or credentials, so it fits in a git hook. It applies three rules: <code>CREATE INDEX</code> without <code>CONCURRENTLY</code>, <code>ALTER COLUMN … TYPE</code>, and <code>CREATE INDEX CONCURRENTLY</code> inside a transaction.</p>
         </div>
 
         <h4>1. Ad-Hoc CLI Execution</h4>
@@ -122,8 +123,8 @@ npx queryguard --lint --migration path/to/migration.sql</code></pre>
         <table style="margin-bottom: 1rem;">
           <thead><tr><th>Exit Code</th><th>Status</th><th>Action</th></tr></thead>
           <tbody>
-            <tr><td><code>0</code></td><td><span class="tag-success">CLEAN</span></td><td>All indexes use <code>CONCURRENTLY</code> and avoid blocking table rewrites. Safe to commit.</td></tr>
-            <tr><td><code>1</code></td><td><span class="tag-danger">HAZARD</span></td><td>Discovered <code>SHARE</code> or <code>ACCESS EXCLUSIVE</code> lock. Prints immediate remediation.</td></tr>
+            <tr><td><code>0</code></td><td><span class="tag-success">NO FINDINGS</span></td><td>None of the three rules matched. This is not proof that the migration is safe.</td></tr>
+            <tr><td><code>1</code></td><td><span class="tag-danger">HAZARD</span></td><td>Found a <code>SHARE</code> lock, an <code>ACCESS EXCLUSIVE</code> lock, or <code>CONCURRENTLY</code> inside a transaction. Prints remediation SQL.</td></tr>
           </tbody>
         </table>
 
@@ -144,7 +145,7 @@ done</code></pre>
       <div class="panel">
         <div class="feature-card">
           <h3>AI Agent Operational Standard (AGENTS.md)</h3>
-          <p>AI coding agents (Cursor, Claude Code, Windsurf, Devin) frequently generate non-concurrent indexes. Commit this standard to your repo root to instruct them to validate and self-correct migrations before marking tasks complete.</p>
+          <p>AI coding agents (Cursor, Claude Code, Windsurf, Devin) frequently generate non-concurrent indexes. Commit this standard to your repo root so they run the linter and self-correct before marking tasks complete. It steers the agent; it does not enforce anything.</p>
         </div>
 
         <div style="position: relative;">
@@ -155,19 +156,21 @@ done</code></pre>
 When authoring or modifying database schemas, migrations, or database queries:
 
 ## 1. Migration Lock Rules
-- **Indexes:** Never generate CREATE INDEX on existing tables without CONCURRENTLY.
-  - Incorrect: CREATE INDEX idx_users_email ON users(email); (blocks table writes)
-  - Correct:   CREATE INDEX CONCURRENTLY idx_users_email ON users(email);
-- **Column Rewrites:** Never alter a column type in place via ALTER TABLE ... ALTER COLUMN ... TYPE ... (blocks all reads and writes). Stage transitions using a new nullable column.
+- **Indexes:** Never generate a plain CREATE INDEX on an existing table (acquires a SHARE lock, blocking writes).
+  - Use CREATE INDEX CONCURRENTLY **only if the migration does not run inside a transaction.** CONCURRENTLY fails inside a transaction block, and many runners wrap every migration in one (Rails and Django do by default), as does an explicit BEGIN ... COMMIT in the file.
+  - Not in a transaction: CREATE INDEX CONCURRENTLY idx_users_email ON users(email);
+  - In a transaction: do not just add CONCURRENTLY. Opt the migration out first (Rails: disable_ddl_transaction!; Django: atomic = False), or put the index in its own migration that runs outside a transaction.
+- **Column Rewrites:** Never alter a column type in place via ALTER TABLE ... ALTER COLUMN ... TYPE ... (acquires ACCESS EXCLUSIVE lock, blocking all reads and writes). Stage transitions using a new nullable column.
 
 ## 2. Pre-Completion Validation Step
 Before marking any task complete that creates or modifies a migration file:
 1. Run the static lock linter:
    npx queryguard --lint --migration &lt;path-to-migration-file&gt;
+   (add --assume-in-transaction if your runner wraps each file in a transaction)
 
 2. **Self-Correction Rule:**
-   - If the linter exits with code 1, inspect the reported [SHARE] or [ACCESS EXCLUSIVE] hazard.
-   - Apply the recommended remediation syntax (e.g., adding CONCURRENTLY).
+   - If the linter exits with code 1, inspect the reported [SHARE], [ACCESS EXCLUSIVE] or [TRANSACTION] hazard.
+   - Apply the recommended fix. For a [TRANSACTION] hazard, move the statement out of the transaction; do not remove CONCURRENTLY.
    - Re-run the command until it exits with code 0.</code></pre>
           <button class="copy-btn" onclick="copySnippet(this)">Copy AGENTS.md</button>
         </div>
@@ -179,12 +182,12 @@ Before marking any task complete that creates or modifies a migration file:
       <div class="panel">
         <div class="feature-card">
           <h3>Pre-Merge PR Sentinel (GitHub Actions)</h3>
-          <p>Executes inside an ephemeral PostgreSQL container on your GitHub Actions runner. Scaffolds synthetic data across <code>UUID</code>, <code>JSONB</code>, and <code>NUMERIC</code> types to evaluate query plans and updates PR comments in place.</p>
+          <p>Runs inside an ephemeral PostgreSQL container on your GitHub Actions runner. It applies your baseline schema and migration (reporting the first statement that fails), then fills tables with generated rows and runs <code>EXPLAIN</code> on your queries. Sequential scans are informational only. The PR comment is updated in place and leads with a status: PASS, FAIL or INCONCLUSIVE.</p>
         </div>
 
         <div class="grid" style="margin-bottom: 1rem;">
           <div>
-            <label for="cfgSchema">Baseline Schema Path (Applied silently, zero lock checks)</label>
+            <label for="cfgSchema">Baseline Schema Path (applied without lock checks; a schema-only dump)</label>
             <input type="text" id="cfgSchema" value="db/schema.sql" oninput="updateYaml()">
           </div>
           <div>
@@ -194,16 +197,24 @@ Before marking any task complete that creates or modifies a migration file:
         </div>
         <div class="grid" style="margin-bottom: 1rem;">
           <div>
-            <label for="cfgQueries">Application Queries Path (Evaluated for Seq Scans)</label>
+            <label for="cfgQueries">Application Queries Path (EXPLAINed on synthetic data; informational)</label>
             <input type="text" id="cfgQueries" value="db/queries.sql" oninput="updateYaml()">
           </div>
           <div>
-            <label for="cfgFail">Block Merge on Sev1 (fail-on-sev1)</label>
+            <label for="cfgFail">Strict mode (fail-on-sev1)</label>
             <select id="cfgFail" onchange="updateYaml()" style="width: 100%; background: var(--code-bg); border: 1px solid var(--border); color: var(--text-bright); padding: 0.65rem; border-radius: 4px;">
-              <option value="false">false (Observation mode - posts PR report without blocking)</option>
-              <option value="true">true (Hard gate - exits with code 1 to block PR merge)</option>
+              <option value="false">false (advisory: the job always passes; the report still leads with the status)</option>
+              <option value="true">true (strict: exit 1 on FAIL, exit 2 on INCONCLUSIVE)</option>
             </select>
           </div>
+        </div>
+
+        <div style="margin-bottom: 1rem;">
+          <label for="cfgTx">Does your migration runner wrap each file in a transaction? (assume-in-transaction)</label>
+          <select id="cfgTx" onchange="updateYaml()" style="width: 100%; background: var(--code-bg); border: 1px solid var(--border); color: var(--text-bright); padding: 0.65rem; border-radius: 4px;">
+            <option value="false">No (default)</option>
+            <option value="true">Yes (Rails and Django do by default)</option>
+          </select>
         </div>
 
         <label>Generated Workflow File: <code>.github/workflows/queryguard.yml</code></label>
@@ -218,24 +229,29 @@ Before marking any task complete that creates or modifies a migration file:
     <div id="guide" class="tab-content">
       <div class="panel">
         <div class="feature-card">
-          <h3>3-Minute Beta Verification Protocols</h3>
-          <p>Run these three test cases on a test branch to verify lock detection, synthetic scan calculation, and thread comment updates.</p>
+          <h3>3-Minute Verification Protocols</h3>
+          <p>Run these test cases on a test branch to verify lock detection, failure reporting, the query-plan smoke test, and in-place comment updates.</p>
         </div>
 
         <h4>Test 1: Migration Lock Sentinel (SHARE Lock)</h4>
         <p>Add a non-concurrent index to your migration file: <code>CREATE INDEX idx_test ON users(email);</code></p>
         <p>• <b>Expected result:</b> QueryGuard flags a <code>SHARE</code> lock hazard and comments the exact <code>CREATE INDEX CONCURRENTLY</code> replacement.</p>
 
-        <h4>Test 2: Full Table Scan Detection (Seq Scan)</h4>
+        <h4>Test 2: Migration That Fails to Apply</h4>
+        <p>Add a statement that errors, for example <code>ALTER TABLE does_not_exist ADD COLUMN x int;</code></p>
+        <p>• <b>Expected result:</b> status <code>FAIL</code>, with the statement, its line number and the Postgres error.</p>
+
+        <h4>Test 3: Sequential Scan on Synthetic Data</h4>
         <p>Add an unindexed filter query to your queries file: <code>SELECT * FROM users WHERE unindexed_col = 'val';</code></p>
-        <p>• <b>Expected result:</b> QueryGuard scaffolds synthetic rows, runs <code>EXPLAIN (FORMAT JSON)</code>, estimates planner cost, and recommends the covering index.</p>
+        <p>• <b>Expected result:</b> QueryGuard fills tables with generated rows, runs <code>EXPLAIN</code>, and lists the scan under <i>Informational</i> with an optional index suggestion. It does not change the status or fail the build.</p>
 
-        <h4>Test 3: In-Place Comment Updates</h4>
-        <p>Push a second commit fixing both issues. QueryGuard patches its original comment in place with a green passing status, leaving zero thread clutter.</p>
+        <h4>Test 4: In-Place Comment Updates</h4>
+        <p>Push a second commit fixing the issues. QueryGuard updates its original comment in place instead of adding a new one.</p>
 
-        <h4 style="margin-top: 1.5rem;">Data Privacy & Isolation Guarantee</h4>
-        <p>• <b>100% Ephemeral Compute:</b> Runs entirely on your GitHub Actions runner and temporary Postgres container.<br>
-        • <b>Zero Data Ingestion:</b> No query strings, table schemas, or PII ever leave your CI runner.</p>
+        <h4 style="margin-top: 1.5rem;">Data Privacy</h4>
+        <p>• <b>Runs on your compute:</b> on your GitHub Actions runner and a temporary Postgres container.<br>
+        • <b>No third-party services:</b> the only network calls are to the GitHub API, to post the PR comment. The comment and job summary contain your migration and query statements and table names, so they are as visible as the pull request.<br>
+        • <b>Synthetic rows only:</b> your data is never read.</p>
       </div>
     </div>
   </div>
@@ -257,63 +273,91 @@ Before marking any task complete that creates or modifies a migration file:
       setTimeout(() => button.textContent = originalText, 1600);
     }
 
+    // Simplified, in-browser preview of the rules. The CLI and Action use a more thorough
+    // tokenizer and a real Postgres; this does not parse nested comments or exotic syntax.
+    const esc = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const IDENT = '(?:"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*)';
+    const QUALIFIED = `${IDENT}(?:\\.${IDENT})?`;
+
+    function splitStatements(sql) {
+      const noComments = sql.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n]*/g, ' ');
+      return noComments.split(';').map((x) => x.trim()).filter(Boolean);
+    }
+
     function runClientSimulation() {
       const ddl = document.getElementById('ddlInput').value;
       const queries = document.getElementById('queryInput').value;
-      const findings = [];
+      const locks = [];
+      let inTx = false;
 
-      const stmts = ddl.split('\n').filter(l => !l.trim().startsWith('--') && !l.trim().startsWith('\\')).join('\n').split(';');
-      for (const raw of stmts) {
-        const stmt = raw.trim();
-        if (/CREATE\s+(UNIQUE\s+)?INDEX/i.test(stmt) && !/CONCURRENTLY/i.test(stmt)) {
-          const match = stmt.match(/CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-zA-Z0-9_]+)\s+ON\s+(?:ONLY\s+)?([a-zA-Z0-9_]+)/i);
-          findings.push({
-            type: 'SHARE Lock',
-            table: match ? match[2] : 'table',
-            blast: 'Blocks concurrent table writes (INSERT/UPDATE/DELETE)',
-            fix: `Use \`CREATE INDEX CONCURRENTLY ${match ? match[1] : 'idx'} ON ${match ? match[2] : 'table'} ...\``
-          });
-        }
-        if (/ALTER\s+TABLE\s+([a-zA-Z0-9_]+)\s+ALTER\s+COLUMN\s+([a-zA-Z0-9_]+)\s+(?:SET\s+DATA\s+)?TYPE/i.test(stmt)) {
-          const match = stmt.match(/ALTER\s+TABLE\s+([a-zA-Z0-9_]+)\s+ALTER\s+COLUMN\s+([a-zA-Z0-9_]+)/i);
-          findings.push({
-            type: 'ACCESS EXCLUSIVE',
-            table: match ? match[1] : 'table',
-            blast: 'Forces full table rewrite; blocks all reads and writes',
-            fix: `Stage transition via new column on \`${match ? match[1] : 'table'}\``
-          });
-        }
-      }
+      for (const stmt of splitStatements(ddl)) {
+        if (/^(BEGIN|START\s+TRANSACTION)\b/i.test(stmt)) { inTx = true; continue; }
+        if (/^(COMMIT|END|ABORT)\b/i.test(stmt) && !/^COMMIT\s+PREPARED/i.test(stmt)) { inTx = false; continue; }
+        if (/^ROLLBACK\b/i.test(stmt) && !/^ROLLBACK\s+(TO|PREPARED)\b/i.test(stmt)) { inTx = false; continue; }
 
-      const queryStmts = queries.split('\n').filter(l => !l.trim().startsWith('--')).join('\n').split(';');
-      for (const raw of queryStmts) {
-        const q = raw.trim();
-        if (q.length > 0 && /WHERE\s+([a-zA-Z0-9_]+)/i.test(q)) {
-          const m = q.match(/FROM\s+([a-zA-Z0-9_]+)\s+WHERE\s+([a-zA-Z0-9_]+)/i);
-          if (m) {
-            findings.push({
-              type: 'Full Table Scan',
-              table: m[1],
-              blast: 'Scans ~2,000 synthetic rows (Cost: 52.4)',
-              fix: `\`CREATE INDEX CONCURRENTLY idx_${m[1]}_${m[2]} ON ${m[1]}(${m[2]});\``
+        const idx = stmt.match(new RegExp(`^CREATE\\s+(?:UNIQUE\\s+)?INDEX\\s+(CONCURRENTLY\\s+)?(?:IF\\s+NOT\\s+EXISTS\\s+)?(?:(?!ON\\b)${IDENT}\\s+)?ON\\s+(?:ONLY\\s+)?(${QUALIFIED})`, 'i'));
+        if (idx) {
+          const table = idx[2];
+          if (!idx[1]) {
+            locks.push({
+              type: 'SHARE Lock', table,
+              impact: 'Blocks concurrent table writes (INSERT/UPDATE/DELETE)',
+              fix: stmt.replace(/^(CREATE\s+(?:UNIQUE\s+)?INDEX)/i, '$1 CONCURRENTLY') + ';',
+              note: inTx ? 'This statement is inside a transaction, where CONCURRENTLY is not allowed: put it in its own migration that runs outside a transaction.' : '',
+            });
+          } else if (inTx) {
+            locks.push({
+              type: 'CONCURRENTLY in a transaction', table,
+              impact: 'Fails at deploy: CREATE INDEX CONCURRENTLY cannot run inside a transaction block',
+              fix: stmt + ';',
+              note: 'Move it out of the transaction. Rails: disable_ddl_transaction!  Django: atomic = False',
             });
           }
         }
-      }
 
-      let html = `<h4 style="color: var(--text-bright); margin-bottom: 0.5rem;">🛡️ QueryGuard Pre-Merge Blast-Radius Report</h4>`;
-      html += `<p style="font-size: 0.75rem; color: #8b949e; margin-bottom: 0.75rem;">*Last evaluated: \`${new Date().toISOString().replace('T', ' ').substring(0, 19)} UTC\`*</p>`;
-
-      if (findings.length === 0) {
-        html += `<p class="tag-success">✅ All checks passed. Zero unindexed full table scans and zero blocking migration locks detected.</p>`;
-      } else {
-        html += `<p class="tag-danger">⚠️ High Blast-Radius Warning: Detected ${findings.length} risky database pattern(s).</p>`;
-        html += `<table><thead><tr><th>Severity</th><th>Issue Type</th><th>Target Table</th><th>Blast Radius</th><th>Suggested Fix</th></tr></thead><tbody>`;
-        for (const f of findings) {
-          html += `<tr><td class="tag-danger">🚨 CRITICAL</td><td><code>${f.type}</code></td><td><code>${f.table}</code></td><td>${f.blast}</td><td>${f.fix}</td></tr>`;
+        const alt = stmt.match(new RegExp(`^ALTER\\s+TABLE\\s+(?:IF\\s+EXISTS\\s+)?(?:ONLY\\s+)?(${QUALIFIED})\\s[\\s\\S]*?\\bALTER\\s+(?:COLUMN\\s+)?(${IDENT})\\s+(?:SET\\s+DATA\\s+)?TYPE\\b`, 'i'));
+        if (alt) {
+          locks.push({
+            type: 'ACCESS EXCLUSIVE', table: alt[1],
+            impact: 'Can rewrite the table; blocks all reads and writes',
+            fix: `Stage the change through a new nullable column on ${alt[1]} instead of altering ${alt[2]} in place.`,
+            note: '',
+          });
         }
-        html += `</tbody></table>`;
       }
+
+      // Heuristic only: a filter on a column MAY sequentially scan. The Action confirms with EXPLAIN.
+      const hints = [];
+      for (const q of splitStatements(queries)) {
+        const m = q.match(new RegExp(`\\bFROM\\s+(${QUALIFIED})\\s+WHERE\\s+(${IDENT})`, 'i'));
+        if (m) hints.push({ table: m[1], col: m[2], sql: `CREATE INDEX CONCURRENTLY idx_${m[1].replace(/\W/g, '')}_${m[2].replace(/\W/g, '')} ON ${m[1]} (${m[2]});` });
+      }
+
+      const status = locks.length > 0 ? 'FAIL' : 'PASS';
+      let html = `<h4 style="color: var(--text-bright); margin-bottom: 0.5rem;">🛡️ QueryGuard Report</h4>`;
+      html += status === 'PASS'
+        ? `<p class="tag-success">✅ Status: PASS — no blocking migration locks were detected by the preview rules.</p>`
+        : `<p class="tag-danger">❌ Status: FAIL — blocking migration lock(s) or transaction hazard(s) detected.</p>`;
+      html += `<p style="font-size: 0.75rem; color: #8b949e; margin-bottom: 0.75rem;">Preview only: it does not apply your migration, so a migration that fails to apply would not be detected here.</p>`;
+
+      if (locks.length > 0) {
+        html += `<h4>Migration findings</h4><table><thead><tr><th>Severity</th><th>Issue Type</th><th>Target Table</th><th>Impact</th></tr></thead><tbody>`;
+        for (const f of locks) {
+          html += `<tr><td class="tag-danger">🚨 CRITICAL</td><td><code>${esc(f.type)}</code></td><td><code>${esc(f.table)}</code></td><td>${esc(f.impact)}</td></tr>`;
+        }
+        html += `</tbody></table><h4>Suggested fixes</h4>`;
+        for (const f of locks) {
+          html += `<p><b><code>${esc(f.table)}</code></b></p><pre><code>${esc(f.fix)}</code></pre>`;
+          if (f.note) html += `<p>${esc(f.note)}</p>`;
+        }
+      }
+
+      if (hints.length > 0) {
+        html += `<h4>ℹ️ Informational: possible sequential scan on synthetic data</h4>`;
+        html += `<p>These queries filter on a column; if it is unindexed they may scan the table. The Action checks this with <code>EXPLAIN</code> on generated rows. It never changes the status.</p>`;
+        for (const h of hints) html += `<p><code>${esc(h.table)}.${esc(h.col)}</code></p><pre><code>${esc(h.sql)}</code></pre>`;
+      }
+      html += `<p style="margin-top: 0.75rem;"><b>A clean query section is not evidence of production safety.</b> Synthetic data cannot reproduce production row counts, skew or statistics.</p>`;
 
       document.getElementById('simulationOutput').innerHTML = html;
     }
@@ -323,8 +367,9 @@ Before marking any task complete that creates or modifies a migration file:
       const m = document.getElementById('cfgMigration').value || 'db/migrations/latest.sql';
       const q = document.getElementById('cfgQueries').value || 'db/queries.sql';
       const fail = document.getElementById('cfgFail').value;
+      const tx = document.getElementById('cfgTx').value;
 
-      const yaml = `name: QueryGuard Blast-Radius Sentinel
+      const yaml = `name: QueryGuard
 
 on:
   pull_request:
@@ -334,7 +379,7 @@ permissions:
   contents: read
 
 jobs:
-  blast-radius-check:
+  queryguard:
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -342,7 +387,6 @@ jobs:
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: testdb
         ports:
           - 5432:5432
         options: >-
@@ -355,13 +399,14 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Run QueryGuard Sentinel
+      - name: Run QueryGuard
         uses: queryguardhq/queryguard@v1
         with:
-          schema-path: '${s}'          # Baseline schema (applied silently, no false positives)
-          migration-path: '${m}'       # Incoming PR migration (evaluated for locks)
-          queries-path: '${q}'         # Hot application queries (evaluated for seq scans)
-          fail-on-sev1: '${fail}'
+          schema-path: '${s}'          # Baseline schema (a schema-only dump, applied without lock checks)
+          migration-path: '${m}'       # Incoming PR migration (checked for locks, then applied)
+          queries-path: '${q}'         # Queries EXPLAINed on synthetic data (informational)
+          fail-on-sev1: '${fail}'      # true = strict: exit 1 on FAIL, exit 2 on INCONCLUSIVE
+          assume-in-transaction: '${tx}'  # true if your runner wraps each migration file in a transaction
           github-token: \${{ secrets.GITHUB_TOKEN }}`;
 
       document.getElementById('yamlOutput').textContent = yaml;
