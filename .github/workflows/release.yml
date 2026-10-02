@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   publish:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       id-token: write # npm provenance
@@ -77,7 +77,7 @@ jobs:
   # so `uses: queryguardhq/queryguard@v1` picks up the verified dist/.
   move-major-tag:
     needs: publish
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
