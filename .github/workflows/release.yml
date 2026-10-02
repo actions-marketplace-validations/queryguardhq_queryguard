@@ -21,22 +21,6 @@ jobs:
     permissions:
       contents: read
       id-token: write # npm provenance
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-    env:
-      TEST_PG_HOST: localhost
-      TEST_PG_PORT: 5432
     steps:
       - uses: actions/checkout@v7
 
@@ -66,6 +50,7 @@ jobs:
             exit 1
           fi
 
+      - run: npm run test:db:up
       - run: npm test
 
       - name: Publish to npm with provenance

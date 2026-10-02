@@ -17,22 +17,6 @@ jobs:
       fail-fast: false
       matrix:
         node-version: [20, 24]
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-    env:
-      TEST_PG_HOST: localhost
-      TEST_PG_PORT: 5432
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -40,6 +24,8 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: npm
       - run: npm ci
+      # Postgres 16 plus the 14-18 snapshot matrix (pg_stat_statements preloaded); see docker-compose.test.yml.
+      - run: npm run test:db:up
       - run: npm test
 
   typecheck:

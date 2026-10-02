@@ -50,6 +50,14 @@ inputs:
     description: 'Set to true if your migration runner wraps each file in a transaction (Rails and Django do by default). CREATE INDEX CONCURRENTLY is then flagged, and the migration is executed inside BEGIN/COMMIT.'
     required: false
     default: 'false'
+  snapshot-path:
+    description: 'Path to a queryguard snapshot directory committed to the repo (e.g. .queryguard/snapshot). Lock findings are annotated with production row counts, sizes and traffic. An invalid snapshot makes the run INCONCLUSIVE. This workflow never needs production credentials.'
+    required: false
+    default: ''
+  snapshot-max-age-days:
+    description: 'A snapshot older than this many days gets a stale warning at the top of the report.'
+    required: false
+    default: '14'
   github-token:
     description: 'GITHUB_TOKEN for PR commenting'
     required: false
