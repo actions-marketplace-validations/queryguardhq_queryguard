@@ -42,6 +42,21 @@ describe('snapshot arguments', () => {
       assert.match(r.stderr, /--host/);
     }));
 
+  test('a bad --top or --sample-window fails before connecting', () =>
+    withTmp((dir) => {
+      for (const args of [
+        ['--top', '0'],
+        ['--top', 'lots'],
+        ['--sample-window', '5'],
+        ['--sample-window', '2h'],
+      ]) {
+        const r = runSnapshotCli(['--label', 'x', ...args], {}, dir);
+        assert.equal(r.exitCode, 1, args.join(' '));
+        assert.match(r.stderr, new RegExp(args[0]), args.join(' '));
+      }
+      assert.deepEqual(fs.readdirSync(dir), []);
+    }));
+
   test('an unreachable server fails with exit 1 and writes nothing', () =>
     withTmp((dir) => {
       const r = runSnapshotCli(['--label', 'x'], { PGHOST: '127.0.0.1', PGPORT: '1', PGUSER: 'nobody', PGDATABASE: 'none' }, dir);

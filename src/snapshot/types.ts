@@ -113,5 +113,74 @@ export interface Shape {
   indexes: IndexShape[];
 }
 
+export type WorkloadKind = 'SELECT' | 'INSERT' | 'UPDATE' | 'DELETE' | 'MERGE' | 'UNKNOWN';
+
+/** One normalized statement (one queryid), aggregated across roles. Counters cover `source.window`. */
+export interface WorkloadStatement {
+  queryid: string;
+  kind: WorkloadKind;
+  /** Normalized text with comments removed, or `[redacted: literal]` / `[redacted: unparseable]`. */
+  text: string;
+  redaction: 'literal' | 'unparseable' | null;
+  calls: number;
+  total_exec_ms: number;
+  mean_exec_ms: number;
+  rows: number;
+  shared_blks_hit: number;
+  shared_blks_read: number;
+  /** Snapshot relations the statement references (`schema.name`). */
+  relations: string[];
+  /** Names that did not resolve to a snapshot relation. Empty for a redacted statement, whose names are only counted. */
+  unresolved: string[];
+  unresolved_count: number;
+  /** Which top-N list selected it. */
+  selected_by: ('total_time' | 'calls')[];
+}
+
+export type WorkloadWindow = { kind: 'since_reset' } | { kind: 'sampled'; seconds: number };
+
+export interface Workload {
+  /** Null when pg_stat_statements could not be read; the manifest says why. */
+  source: {
+    extension_version: string;
+    /** When pg_stat_statements was last reset: the start of a `since_reset` window. */
+    stats_reset: string | null;
+    /** Entries evicted because pg_stat_statements.max was reached. */
+    dealloc: number;
+    window: WorkloadWindow;
+  } | null;
+  selection: {
+    top: number;
+    /** Statements eligible for selection: plannable, touching at least one non-system relation, active in the window. */
+    candidates: number;
+    selected: number;
+  };
+  /** Present for a sampled window: entries that could not be matched across the two readings. */
+  sampling?: { new_entries: number; evicted_entries: number; dealloc_during_window: number };
+  statements: WorkloadStatement[];
+}
+
+/** What was withheld from the artifact, and why. Counts and queryids only, never content. */
+export interface Redactions {
+  workload: {
+    /** pg_stat_statements entries (per role) read for this database. */
+    entries_read: number;
+    excluded: {
+      /** Utility commands: everything except SELECT, INSERT, UPDATE, DELETE and MERGE. */
+      not_dml: number;
+      /** Text shown as `<insufficient privilege>`: run by another role, and the snapshot role lacks pg_read_all_stats. */
+      text_hidden: number;
+      /** Plannable statements that reference only system catalogs. */
+      system_only: number;
+      /** Plannable statements that reference no relation at all, e.g. `SELECT $1`. */
+      no_relations: number;
+    };
+    /** Selected statements whose comments were removed. */
+    comments_removed: number;
+    /** Selected statements whose text was replaced, by reason. */
+    redacted: { literal: string[]; unparseable: string[] };
+  };
+}
+
 /** COMPLETE and PARTIAL write an artifact; FAILED writes nothing and leaves any previous snapshot alone. */
 export const SNAPSHOT_EXIT = { COMPLETE: 0, FAILED: 1, PARTIAL: 2 } as const;

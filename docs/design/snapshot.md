@@ -195,22 +195,52 @@ queryguard snapshot inspect <dir>
 
 ```json
 {
-  "source": { "extension_version": "1.11", "stats_reset": "…", "dealloc": 0,
+  "source": { "extension_version": "1.11", "stats_reset": "2026-09-01T00:00:00.000Z", "dealloc": 0,
               "window": { "kind": "since_reset" } },
-  "selection": { "top_by_total_time": 200, "top_by_calls": 200, "selected": 287 },
+  "selection": { "top": 200, "candidates": 812, "selected": 287 },
   "statements": [
     { "queryid": "-4235817762918331217", "kind": "SELECT",
-      "text": "SELECT id FROM orders WHERE customer_id = $1",
+      "text": "SELECT id FROM orders WHERE customer_id = $1", "redaction": null,
       "calls": 7100000000, "total_exec_ms": 81000000, "mean_exec_ms": 0.0114, "rows": 7100000000,
-      "relations": ["public.orders"], "unresolved": [] },
-    { "queryid": "…", "kind": "UPDATE", "text": "[redacted: literal]", "calls": 1, "relations": [], "unresolved": [] }
+      "shared_blks_hit": 21000000000, "shared_blks_read": 3100000,
+      "relations": ["public.orders"], "unresolved": [], "unresolved_count": 0,
+      "selected_by": ["total_time", "calls"] },
+    { "queryid": "…", "kind": "SELECT", "text": "[redacted: literal]", "redaction": "literal", "calls": 5,
+      "relations": ["public.orders"], "unresolved": [], "unresolved_count": 0, "...": "..." }
   ]
 }
 ```
 
-* `window.kind` is `since_reset` or `sampled` (with `seconds`). Rates are computed at load time from the window, so the artifact stores counts, not rates.
-* Statements are aggregated across `userid` per `queryid` in the current `dbid`, `toplevel = true` only.
-* `relations` lists only names that resolve against `shape.json`. A statement redacted for a literal keeps its resolved relations; its unresolved names are counted, not listed. A statement redacted as `unparseable` has no relations ([Decision 3](#decisions-2026-10-02)).
+A sampled window adds `"window": { "kind": "sampled", "seconds": 300 }` and `"sampling": { "new_entries", "evicted_entries", "dealloc_during_window" }`.
+
+* **Window:** `window.kind` is `since_reset` or `sampled` (with `seconds`). Rates are computed at load time from the window, so the artifact stores counts, not rates.
+* **Aggregation:** statements are aggregated across `userid` per `queryid` in the current database (`dbid`), `toplevel = true` only. **Every role's text for a queryid must pass the pipeline.** If any one has a literal, the statement is redacted.
+* **Selection happens after filtering:** the top N by total time ∪ the top N by calls are chosen among *candidates*, which excludes:
+  * utility commands;
+  * statements that reference only system catalogs or extension relations (our own reads, monitoring agents);
+  * statements that reference no relation at all (`SELECT $1` pool pings);
+  * with a sampled window, statements that did not run during the window.
+
+  Selecting first would let utility commands and health checks take slots that belong to application traffic. Exclusions are counted in `redactions.json`.
+* **Relations:** `relations` lists only names that resolve against `shape.json`. A qualified name must match exactly. An unqualified name resolves only when exactly one schema has a relation by that name; otherwise it is unresolved (ambiguous). Views are not snapshot relations, so references to them are unresolved.
+  * A statement redacted for a literal keeps its resolved relations; its unresolved names are counted, not listed.
+  * A statement redacted as `unparseable` has kind `UNKNOWN` and no relations ([Decision 3](#decisions-2026-10-02)).
+* **`pg_stat_statements` unavailable:** not installed, older than 1.9, or unreadable. Then `source` is null, `statements` is empty, and the manifest says why (PARTIAL).
+
+### `redactions.json`
+
+```json
+{
+  "workload": {
+    "entries_read": 1430,
+    "excluded": { "not_dml": 402, "text_hidden": 0, "system_only": 190, "no_relations": 26 },
+    "comments_removed": 41,
+    "redacted": { "literal": ["-20"], "unparseable": [] }
+  }
+}
+```
+
+Counts and queryids only, never text. A reviewer can look up a redacted queryid in production's pg_stat_statements. `dealloc` is in `workload.json`'s `source`. Item 4 adds a `schema` section for what was removed from `schema.sql`.
 
 ## Privacy rules (shape mode)
 
@@ -223,8 +253,10 @@ queryguard snapshot inspect <dir>
 1. Drop the entry if the text is `<insufficient privilege>` (PARTIAL).
 2. Strip comments with a scanner that handles nested `/* */`, `--`, and quotes and dollar quotes. Unterminated constructs → redact (`reason: unparseable`).
 3. Classify by the first keyword: `SELECT/INSERT/UPDATE/DELETE/MERGE`, or `WITH` followed by one of those (`TABLE` and `VALUES` count as SELECT). Anything else is excluded (`reason: not_dml`).
-4. **Literal detector** on the tokens: any string-like token (`'…'`, `E'…'`, `U&'…'`, `B'…'`, `X'…'`, dollar-quoted) or any numeric token that is not part of a `$n` parameter → `[redacted: literal]`. This deliberately catches false positives like a typmod `varchar(10)`, and the redaction report counts them.
-5. Store the stripped, normalized text.
+4. **Literal detector** on the tokens: any string-like token (`'…'`, `E'…'`, `U&'…'`, `B'…'`, `X'…'`, `N'…'`, dollar-quoted) or any numeric token that is not part of a `$n` parameter → `[redacted: literal]`.
+   * It deliberately catches false positives, like a typmod `varchar(10)`, and the redaction report counts them.
+   * Literals do survive normalization in practice. A positional `GROUP BY 1` / `ORDER BY 1` is not a constant, so it keeps its number on 14–18 (the fixture uses it as a deterministic surviving literal). Utility commands keep their literals verbatim even on 18; `COMMENT ON … IS '…'` is the fixture's example.
+5. Store the stripped, normalized text: comments removed, every gap between tokens collapsed to one space.
 
 **`schema.sql`** contains everything DDL contains: table, column and index names, enum labels, defaults, check constraints, view and function bodies. Function bodies can embed anything, including secrets. `schema.sql` is the file a reviewer must actually read (see [pg_dump](#schemasql-and-pg_dump)).
 

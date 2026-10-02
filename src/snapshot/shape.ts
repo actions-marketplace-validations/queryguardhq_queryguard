@@ -44,6 +44,14 @@ SELECT c.oid::int8 AS oid, n.nspname AS schema, c.relname AS name, c.relkind::te
       WHERE d.classid = 'pg_catalog.pg_class'::pg_catalog.regclass AND d.objid = c.oid AND d.deptype = 'e')
  ORDER BY n.nspname, c.relname`;
 
+/** Relations that belong to an extension (e.g. the pg_stat_statements view): not snapshot relations, not reported. */
+const EXTENSION_RELATIONS_SQL = `
+SELECT n.nspname AS schema, c.relname AS name
+  FROM pg_catalog.pg_depend d
+  JOIN pg_catalog.pg_class c ON c.oid = d.objid
+  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+ WHERE d.classid = 'pg_catalog.pg_class'::pg_catalog.regclass AND d.deptype = 'e'`;
+
 const CONTEXT_SQL = `
 SELECT pg_catalog.current_setting('block_size')::int AS block_size,
        (SELECT d.stats_reset FROM pg_catalog.pg_stat_database d
@@ -119,6 +127,8 @@ interface BatchResult {
 export interface ShapeResult {
   shape: Shape;
   partial: PartialReason[];
+  /** Extension-owned relations, for resolving workload references. Not written to the artifact. */
+  extensionRelations: { schema: string; name: string }[];
 }
 
 /** Collects shape-mode data. Must run inside one read-only transaction (see `readOnly`). */
@@ -197,7 +207,9 @@ export async function collectShape(db: Queryable, serverVersionNum: number): Pro
   }
 
   indexes.sort((a, b) => a.schema.localeCompare(b.schema) || a.name.localeCompare(b.name));
+  const extensionRelations = (await db.query(EXTENSION_RELATIONS_SQL)).rows.map((r) => ({ schema: r.schema, name: r.name }));
   return {
+    extensionRelations,
     shape: {
       block_size: blockSize,
       size_source: 'relpages',

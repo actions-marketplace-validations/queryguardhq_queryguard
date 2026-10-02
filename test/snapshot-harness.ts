@@ -219,6 +219,7 @@ export async function createFixture(version: number): Promise<Fixture> {
       await c.query(
         `CREATE MATERIALIZED VIEW order_totals AS SELECT customer_id, sum(total) AS total FROM orders GROUP BY customer_id`
       );
+      await c.query(`CREATE VIEW active_customers AS SELECT id, email FROM customers WHERE status = 'active'`);
       await c.query(`ANALYZE customers`);
       await c.query(`ANALYZE orders`);
       await c.query(`ANALYZE events`);
@@ -230,6 +231,10 @@ export async function createFixture(version: number): Promise<Fixture> {
         `UPDATE orders SET status = status WHERE note = '${canaries.query_literal_write}'`,
         `SELECT count(*) FROM orders /* ${canaries.query_comment_inline} */ WHERE status = 'shipped'`,
         `SELECT o.id, c.email FROM orders o JOIN customers c ON c.id = o.customer_id WHERE c.id = 42 -- ${canaries.query_comment_trailing}`,
+        // A positional GROUP BY is not a constant, so this literal survives normalization.
+        `SELECT status, count(*) FROM orders GROUP BY 1`,
+        // Views are not snapshot relations, so this reference stays unresolved.
+        `SELECT count(*) FROM active_customers`,
       ];
       for (let i = 0; i < 5; i++) for (const q of workload) await c.query(q);
     } finally {
@@ -361,4 +366,34 @@ export function runSnapshotCli(args: readonly string[], env: Record<string, stri
     { cwd, env: { PATH: process.env.PATH, ...env }, encoding: 'utf8' }
   );
   return { exitCode: res.status, stdout: res.stdout, stderr: res.stderr };
+}
+
+/** A database on a matrix server with no extension and no tables, as an owner superuser. */
+export async function createBareDatabase(version: number): Promise<{
+  config: ClientConfig;
+  env: Record<string, string>;
+  cleanup(): Promise<void>;
+}> {
+  const server = snapshotServer(version);
+  const database = `qg_bare_${hex(6)}`;
+  const admin = new Client({ ...server, database: 'postgres' });
+  await admin.connect();
+  try {
+    await admin.query(`CREATE DATABASE ${database}`);
+  } finally {
+    await admin.end();
+  }
+  return {
+    config: { ...server, database },
+    env: { PGHOST: server.host, PGPORT: String(server.port), PGUSER: server.user, PGPASSWORD: server.password, PGDATABASE: database },
+    async cleanup() {
+      const a = new Client({ ...server, database: 'postgres' });
+      await a.connect();
+      try {
+        await a.query(`DROP DATABASE IF EXISTS ${database} WITH (FORCE)`);
+      } finally {
+        await a.end();
+      }
+    },
+  };
 }
