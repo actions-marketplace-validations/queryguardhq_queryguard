@@ -155,6 +155,18 @@ export async function createFixture(version: number): Promise<Fixture> {
   };
 
   const cleanup = async () => {
+    // Free this database's pg_stat_statements entries, which would otherwise outlive it and
+    // crowd the shared table for every later test.
+    try {
+      const own = await connect();
+      try {
+        await own.query(`SELECT pg_stat_statements_reset(0, (SELECT oid FROM pg_database WHERE datname = current_database()), 0)`);
+      } finally {
+        await own.end();
+      }
+    } catch {
+      // the database may never have been fully created
+    }
     const a = new Client({ ...server, database: 'postgres' });
     await a.connect();
     try {
@@ -169,6 +181,14 @@ export async function createFixture(version: number): Promise<Fixture> {
     const c = await connect();
     try {
       await c.query(`CREATE EXTENSION IF NOT EXISTS pg_stat_statements`);
+      // pg_stat_statements is shared by the whole server and outlives dropped databases. Keep only
+      // the entries of live test databases, so repeated runs never fill it and force evictions.
+      await c.query(
+        `SELECT pg_stat_statements_reset(0, s.dbid, 0)
+           FROM (SELECT DISTINCT dbid FROM pg_stat_statements) s
+          WHERE s.dbid <> 0 -- a zero dbid would make this a full reset, wiping other tests' entries
+            AND s.dbid NOT IN (SELECT oid FROM pg_database WHERE datname LIKE 'qg\\_%')`
+      );
       await c.query(`
         CREATE TABLE customers (
           id bigserial PRIMARY KEY,
@@ -267,20 +287,24 @@ export async function createFixture(version: number): Promise<Fixture> {
   };
 }
 
-/** Cumulative stats reach other sessions asynchronously; wait until the fixture's inserts are visible. */
+/**
+ * Cumulative stats reach other sessions asynchronously (on 14, through the stats collector); wait
+ * until the fixture's inserts and its VACUUM ANALYZE are both visible.
+ */
 async function waitForTableStats(connect: () => Promise<Client>): Promise<void> {
   const c = await connect();
   try {
     for (let i = 0; i < 100; i++) {
       const { rows } = await c.query(
         `SELECT coalesce(sum(n_tup_ins) FILTER (WHERE relname = 'customers'), 0)::int AS customers,
-                coalesce(sum(n_tup_ins) FILTER (WHERE relname = 'orders'), 0)::int AS orders
+                coalesce(sum(n_tup_ins) FILTER (WHERE relname = 'orders'), 0)::int AS orders,
+                count(*) FILTER (WHERE relname IN ('customers', 'orders') AND last_analyze IS NOT NULL)::int AS analyzed
            FROM pg_stat_user_tables`
       );
-      if (rows[0].customers >= 5000 && rows[0].orders >= 20000) return;
+      if (rows[0].customers >= 5000 && rows[0].orders >= 20000 && rows[0].analyzed === 2) return;
       await new Promise((r) => setTimeout(r, 100));
     }
-    throw new Error('fixture inserts never appeared in pg_stat_user_tables');
+    throw new Error('fixture inserts and ANALYZE never appeared in pg_stat_user_tables');
   } finally {
     await c.end();
   }
