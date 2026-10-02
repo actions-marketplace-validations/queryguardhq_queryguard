@@ -8,6 +8,7 @@ import { DEFAULT_TOP } from './workload';
 const USAGE = `
 USAGE:
   $ queryguard snapshot --label <name> [options]
+  $ queryguard snapshot --label <name> --mode full --allow-columns <file> [options]
 
   Read-only export of production's shape. Connects with the standard libpq environment
   (PGHOST, PGPORT, PGUSER, PGPASSWORD, PGDATABASE, PGSSLMODE); no connection detail is
@@ -23,6 +24,13 @@ OPTIONS:
                    everything since the last reset. No transaction is held open meanwhile.
   --precision      approx (default): counts, sizes and times rounded to 2 significant figures.
                    exact: unrounded.
+  --mode           shape (default): shape and skew only, never a value from a row.
+                   full: also writes stats.sql, the planner statistics for restoring into
+                   another PostgreSQL 18 database; needs a PostgreSQL 18 server and
+                   --allow-columns
+  --allow-columns  Full mode: a file of schema.table.column (or table.column) lines, one
+                   per column whose full statistics (most common values, histograms) may
+                   leave production. Every other column gets shape fields only.
   --pg-dump        pg_dump binary to use (default: the first one on PATH at least as new as
                    the server)
   --schema-from    Use this pg_dump --schema-only file instead of running pg_dump, so the
@@ -54,6 +62,8 @@ export async function runSnapshot(argv: string[]): Promise<number> {
     top?: string;
     'sample-window'?: string;
     precision?: string;
+    mode?: string;
+    'allow-columns'?: string;
     'pg-dump'?: string;
     'schema-from'?: string;
     help?: boolean;
@@ -67,6 +77,8 @@ export async function runSnapshot(argv: string[]): Promise<number> {
         top: { type: 'string', default: String(DEFAULT_TOP) },
         'sample-window': { type: 'string' },
         precision: { type: 'string', default: 'approx' },
+        mode: { type: 'string', default: 'shape' },
+        'allow-columns': { type: 'string' },
         'pg-dump': { type: 'string' },
         'schema-from': { type: 'string' },
         help: { type: 'boolean', short: 'h' },
@@ -89,6 +101,14 @@ export async function runSnapshot(argv: string[]): Promise<number> {
   const windowMs = values['sample-window'] === undefined ? undefined : parseDuration(values['sample-window']);
   if (windowMs === null) return usageError('--sample-window must look like 30s, 5m or 1h (1s to 1h)');
   if (values.precision !== 'approx' && values.precision !== 'exact') return usageError('--precision must be approx or exact');
+  if (values.mode !== 'shape' && values.mode !== 'full') return usageError('--mode must be shape or full');
+  if (values.mode === 'full' && values['allow-columns'] === undefined) {
+    return usageError('--mode full needs --allow-columns: the columns whose full statistics may leave production');
+  }
+  if (values.mode === 'shape' && values['allow-columns'] !== undefined) return usageError('--allow-columns only applies to --mode full');
+  if (values['allow-columns'] !== undefined && !fs.existsSync(values['allow-columns'])) {
+    return usageError(`--allow-columns file not found: ${values['allow-columns']}`);
+  }
   if (values['schema-from'] !== undefined) {
     if (values['pg-dump'] !== undefined) return usageError('--pg-dump has no effect with --schema-from; pass one or the other');
     if (!fs.existsSync(values['schema-from'])) return usageError(`--schema-from file not found: ${values['schema-from']}`);
@@ -100,6 +120,8 @@ export async function runSnapshot(argv: string[]): Promise<number> {
       out: values.out!,
       top,
       precision: values.precision as Precision,
+      mode: values.mode,
+      allowColumns: values['allow-columns'],
       windowMs,
       schemaFrom: values['schema-from'],
       pgDump: values['pg-dump'],

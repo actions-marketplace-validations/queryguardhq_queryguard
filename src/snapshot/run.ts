@@ -2,6 +2,15 @@ import * as fs from 'fs';
 import { ClientConfig } from 'pg';
 import pkg from '../../package.json';
 import { formatShape, formatWorkload, Precision } from './format';
+import {
+  buildStatsSql,
+  collectFullStats,
+  columnName,
+  FULL_MODE_MIN_SERVER,
+  parseAllowList,
+  readRelallfrozen,
+  resolveAllowList,
+} from './fullstats';
 import { sha256 } from './load';
 import { findPgDump, runPgDump } from './pgdump';
 import { makeResolver } from './relations';
@@ -11,13 +20,16 @@ import { collectShape } from './shape';
 import { FORMAT_VERSION, Manifest } from './types';
 import { validateSnapshot } from './validate';
 import { buildWorkload, emptyWorkload, readWorkload, ReadResult } from './workload';
-import { stableStringify, writeArtifact } from './writer';
+import { byCodepoint, stableStringify, writeArtifact } from './writer';
 
 export interface SnapshotOptions {
   label: string;
   out: string;
   top: number;
   precision: Precision;
+  mode: 'shape' | 'full';
+  /** Full mode: the allow-list file of columns whose full statistics may leave production. */
+  allowColumns?: string;
   /** Milliseconds between the two pg_stat_statements readings; undefined for since-reset counters. */
   windowMs?: number;
   /** A schema-only dump made elsewhere, instead of running pg_dump. */
@@ -38,6 +50,7 @@ const MIN_SERVER = 140000;
  */
 export async function takeSnapshot(opts: SnapshotOptions): Promise<Manifest> {
   const log = opts.log ?? (() => {});
+  const allowList = opts.mode === 'full' ? parseAllowList(fs.readFileSync(opts.allowColumns!, 'utf8')) : [];
   const client = await openSnapshotSession(opts.clientConfig);
   let collected;
   let dumpText: string;
@@ -48,6 +61,9 @@ export async function takeSnapshot(opts: SnapshotOptions): Promise<Manifest> {
       throw new Error(`PostgreSQL ${Math.floor(serverVersionNum / 10000)} is not supported; snapshots need PostgreSQL 14 or newer`);
     }
     const serverMajor = Math.floor(serverVersionNum / 10000);
+    if (opts.mode === 'full' && serverVersionNum < FULL_MODE_MIN_SERVER) {
+      throw new Error(`--mode full needs a PostgreSQL 18 or newer server (this one is ${serverMajor}); use the default shape mode`);
+    }
 
     if (opts.schemaFrom) {
       dumpText = fs.readFileSync(opts.schemaFrom, 'utf8');
@@ -71,16 +87,23 @@ export async function takeSnapshot(opts: SnapshotOptions): Promise<Manifest> {
       log(`sampling pg_stat_statements for ${opts.windowMs / 1000}s`);
       await new Promise((r) => setTimeout(r, opts.windowMs));
     }
-    const inTx = await readOnly(client, async () => ({
-      ...(await collectShape(client, serverVersionNum)),
-      after: await readWorkload(client),
-    }));
+    const inTx = await readOnly(client, async () => {
+      const shapeResult = await collectShape(client, serverVersionNum);
+      const after = await readWorkload(client);
+      if (opts.mode !== 'full') return { ...shapeResult, after, full: undefined };
+      const allowed = resolveAllowList(allowList, shapeResult.shape);
+      return {
+        ...shapeResult,
+        after,
+        full: { allowed, relallfrozen: await readRelallfrozen(client), ...(await collectFullStats(client, allowed)) },
+      };
+    });
     collected = { serverVersionNum, dump, before, ...inTx };
   } finally {
     await client.end();
   }
 
-  const { serverVersionNum, dump, before, after, shape } = collected;
+  const { serverVersionNum, dump, before, after, shape, full } = collected;
   const workload = !after.ok
     ? emptyWorkload(opts.top, after.reason)
     : before && !before.ok
@@ -96,20 +119,24 @@ export async function takeSnapshot(opts: SnapshotOptions): Promise<Manifest> {
     ...fillIndexExpressions(dump, shape.indexes),
     ...collected.partial,
     ...workload.partial,
+    ...(full?.partial ?? []),
   ];
 
-  const files = {
+  const formattedShape = formatShape(shape, opts.precision);
+  const files: Record<string, string> = {
     'schema.sql': dump.text,
-    'shape.json': stableStringify(formatShape(shape, opts.precision)),
+    'shape.json': stableStringify(formattedShape),
     'workload.json': stableStringify(formatWorkload(workload.workload, opts.precision)),
     'redactions.json': stableStringify({ schema: dump.redactions, ...workload.redactions }),
   };
+  if (full) files['stats.sql'] = buildStatsSql(formattedShape, full.relallfrozen, full.rows, serverVersionNum);
   const manifest: Manifest = {
     format_version: FORMAT_VERSION,
     created_at: new Date().toISOString(),
     label: opts.label,
     server_version_num: serverVersionNum,
-    mode: 'shape',
+    mode: opts.mode,
+    ...(full ? { allowed_columns: full.allowed.map(columnName).sort(byCodepoint) } : {}),
     precision: opts.precision,
     status: partial.length > 0 ? 'PARTIAL' : 'COMPLETE',
     partial_reasons: partial,

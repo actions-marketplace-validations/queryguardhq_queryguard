@@ -453,3 +453,13 @@ export async function createBareDatabase(version: number): Promise<{
     },
   };
 }
+
+/** Runs a SQL script with psql inside a matrix server's container, stopping at the first error. */
+export function psqlInContainer(version: number, database: string, sql: string): { status: number | null; stdout: string; stderr: string } {
+  const res = spawnSync(
+    'docker',
+    ['compose', '-f', path.join(ROOT, 'docker-compose.test.yml'), 'exec', '-T', `pg${version}`, 'psql', '-X', '-q', '-v', 'ON_ERROR_STOP=1', '-U', PG.user, '-d', database],
+    { input: sql, encoding: 'utf8', maxBuffer: 1 << 28 }
+  );
+  return { status: res.status, stdout: res.stdout, stderr: res.stderr };
+}

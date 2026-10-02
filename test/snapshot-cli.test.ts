@@ -57,6 +57,22 @@ describe('snapshot arguments', () => {
       assert.deepEqual(fs.readdirSync(dir), []);
     }));
 
+  test('--mode and --allow-columns must agree', () =>
+    withTmp((dir) => {
+      fs.writeFileSync(path.join(dir, 'allow.txt'), 'public.t.c\n');
+      const cases: Array<[string[], RegExp]> = [
+        [['--mode', 'everything'], /--mode must be shape or full/],
+        [['--mode', 'full'], /--mode full needs --allow-columns/],
+        [['--allow-columns', 'allow.txt'], /--allow-columns only applies to --mode full/],
+        [['--mode', 'full', '--allow-columns', 'missing.txt'], /--allow-columns file not found/],
+      ];
+      for (const [args, message] of cases) {
+        const r = runSnapshotCli(['--label', 'x', ...args], {}, dir);
+        assert.equal(r.exitCode, 1, args.join(' '));
+        assert.match(r.stderr, message);
+      }
+    }));
+
   test('an unreachable server fails with exit 1 and writes nothing', () =>
     withTmp((dir) => {
       const r = runSnapshotCli(['--label', 'x'], { PGHOST: '127.0.0.1', PGPORT: '1', PGUSER: 'nobody', PGDATABASE: 'none' }, dir);

@@ -35,6 +35,12 @@
         "label": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$" },
         "server_version_num": { "type": "integer", "minimum": 140000 },
         "mode": { "enum": ["shape", "full"] },
+        "allowed_columns": {
+          "description": "Full mode: the columns whose value statistics (most common values, histograms) are in stats.sql.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/name" }
+        },
         "precision": { "enum": ["approx", "exact"] },
         "status": { "enum": ["COMPLETE", "PARTIAL"] },
         "partial_reasons": {
@@ -71,6 +77,19 @@
         }
       },
       "allOf": [
+        {
+          "if": { "properties": { "mode": { "const": "full" } } },
+          "then": {
+            "required": ["allowed_columns"],
+            "properties": {
+              "allowed_columns": true,
+              "files": { "type": "object", "required": ["stats.sql"], "properties": { "stats.sql": true } }
+            }
+          },
+          "else": {
+            "properties": { "allowed_columns": false, "files": { "type": "object", "properties": { "stats.sql": false } } }
+          }
+        },
         {
           "if": { "properties": { "status": { "const": "COMPLETE" } } },
           "then": { "properties": { "partial_reasons": { "type": "array", "maxItems": 0 } } },

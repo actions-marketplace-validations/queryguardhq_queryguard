@@ -15,6 +15,8 @@ export interface Manifest {
   label: string;
   server_version_num: number;
   mode: 'shape' | 'full';
+  /** Full mode: the columns whose value statistics are in stats.sql. */
+  allowed_columns?: string[];
   precision: 'approx' | 'exact';
   status: SnapshotStatus;
   partial_reasons: PartialReason[];

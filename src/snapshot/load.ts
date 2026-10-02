@@ -12,6 +12,8 @@ export interface Snapshot {
   workload: Workload;
   redactions: Redactions;
   schemaSql: string;
+  /** Full mode only. */
+  statsSql?: string;
 }
 
 export type LoadResult = { ok: true; snapshot: Snapshot } | { ok: false; errors: string[] };
@@ -80,6 +82,7 @@ export function loadSnapshot(dir: string): LoadResult {
       workload: bundle.workload as Workload,
       redactions: bundle.redactions as Redactions,
       schemaSql: contents['schema.sql'].toString('utf8'),
+      ...(contents['stats.sql'] ? { statsSql: contents['stats.sql'].toString('utf8') } : {}),
     },
   };
 }
