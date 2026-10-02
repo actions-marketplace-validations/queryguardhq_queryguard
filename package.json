@@ -1,6 +1,6 @@
 {
   "name": "@queryguardhq/queryguard",
-  "version": "1.3.1",
+  "version": "1.4.0",
   "description": "PostgreSQL migration lock linter and synthetic query-plan smoke test.",
   "main": "dist/index.js",
   "bin": {
