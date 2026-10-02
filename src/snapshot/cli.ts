@@ -1,6 +1,7 @@
 import { parseArgs } from 'util';
 import pkg from '../../package.json';
 import { openSnapshotSession, readOnly } from './session';
+import { collectShape } from './shape';
 import { FORMAT_VERSION, Manifest, PartialReason, SNAPSHOT_EXIT } from './types';
 import { stableStringify, writeArtifact } from './writer';
 
@@ -25,7 +26,6 @@ const LABEL = /^[A-Za-z0-9._-]{1,64}$/;
 /** Parts not collected yet. Each is reported, so the snapshot says PARTIAL instead of looking complete. */
 const NOT_COLLECTED: PartialReason[] = [
   { scope: 'schema', reason: 'not collected: schema.sql generation is not implemented yet' },
-  { scope: 'shape', reason: 'not collected: shape collection is not implemented yet' },
   { scope: 'workload', reason: 'not collected: workload collection is not implemented yet' },
 ];
 
@@ -57,17 +57,19 @@ export async function runSnapshot(argv: string[]): Promise<number> {
 
   try {
     const client = await openSnapshotSession();
-    let serverVersionNum: number;
+    let collected;
     try {
-      serverVersionNum = await readOnly(client, async () => {
-        const { rows } = await client.query(`SELECT current_setting('server_version_num')::int AS v`);
-        return rows[0].v as number;
+      collected = await readOnly(client, async () => {
+        const { rows } = await client.query(`SELECT pg_catalog.current_setting('server_version_num')::int AS v`);
+        const serverVersionNum: number = rows[0].v;
+        return { serverVersionNum, ...(await collectShape(client, serverVersionNum)) };
       });
     } finally {
       await client.end();
     }
+    const { serverVersionNum, shape } = collected;
 
-    const partial = [...NOT_COLLECTED];
+    const partial = [...NOT_COLLECTED, ...collected.partial];
     const manifest: Manifest = {
       format_version: FORMAT_VERSION,
       created_at: new Date().toISOString(),
@@ -78,7 +80,10 @@ export async function runSnapshot(argv: string[]): Promise<number> {
       partial_reasons: partial,
       tool_version: pkg.version,
     };
-    writeArtifact(values.out!, { 'manifest.json': stableStringify(manifest) });
+    writeArtifact(values.out!, {
+      'manifest.json': stableStringify(manifest),
+      'shape.json': stableStringify(shape),
+    });
 
     console.log(`[QueryGuard] snapshot '${manifest.label}' written to ${values.out}: ${manifest.status}`);
     for (const p of partial) console.log(`  - ${p.scope}: ${p.reason}`);

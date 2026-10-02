@@ -1,7 +1,7 @@
 // Test infrastructure for `queryguard snapshot`: a Postgres 14-18 matrix with pg_stat_statements
 // preloaded (docker-compose.test.yml), a fixture database full of canary strings, and a scanner
 // that proves none of them reached the artifact.
-import { Client } from 'pg';
+import { Client, ClientConfig } from 'pg';
 import { spawnSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -73,7 +73,33 @@ export interface Fixture {
   env: Record<string, string>;
   /** A connection as the fixture owner; the caller ends it. */
   connect(): Promise<Client>;
+  /** Connection settings for the fixture database, as its owner or as another role. */
+  config(login?: { role: string; password: string }): ClientConfig;
+  /** A LOGIN role with no privileges beyond PUBLIC's, dropped by cleanup(). */
+  createRole(): Promise<{ role: string; password: string }>;
   cleanup(): Promise<void>;
+}
+
+/**
+ * The shape function from docs/design/snapshot.md ("Minimal-grants recipe"): lets a role read the
+ * skew profile in pg_stats without SELECT on any table. Run as the owner of the tables.
+ */
+export function shapeFunctionSql(grantee: string): string[] {
+  return [
+    `CREATE SCHEMA IF NOT EXISTS queryguard`,
+    `CREATE FUNCTION queryguard.column_shape()
+  RETURNS TABLE (schemaname name, tablename name, attname name, inherited bool,
+                 null_frac real, avg_width int, n_distinct real, correlation real,
+                 most_common_freqs real[])
+  LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog AS $$
+    SELECT schemaname, tablename, attname, inherited, null_frac, avg_width,
+           n_distinct, correlation, most_common_freqs
+    FROM pg_catalog.pg_stats
+    WHERE schemaname NOT IN ('pg_catalog', 'information_schema') $$`,
+    `REVOKE ALL ON FUNCTION queryguard.column_shape() FROM PUBLIC`,
+    `GRANT USAGE ON SCHEMA queryguard TO ${grantee}`,
+    `GRANT EXECUTE ON FUNCTION queryguard.column_shape() TO ${grantee}`,
+  ];
 }
 
 /**
@@ -100,10 +126,30 @@ export async function createFixture(version: number): Promise<Fixture> {
     await admin.end();
   }
 
+  const config = (login = { role, password }): ClientConfig => ({
+    host: server.host,
+    port: server.port,
+    user: login.role,
+    password: login.password,
+    database,
+  });
   const connect = async () => {
-    const c = new Client({ host: server.host, port: server.port, user: role, password, database });
+    const c = new Client(config());
     await c.connect();
     return c;
+  };
+
+  const extraRoles: string[] = [];
+  const createRole = async () => {
+    const login = { role: `qg_role_${hex(6)}`, password: `qgsecret${hex(8)}` };
+    const c = await connect();
+    try {
+      await c.query(`CREATE ROLE ${login.role} LOGIN PASSWORD '${login.password}'`);
+      extraRoles.push(login.role);
+    } finally {
+      await c.end();
+    }
+    return login;
   };
 
   const cleanup = async () => {
@@ -111,7 +157,7 @@ export async function createFixture(version: number): Promise<Fixture> {
     await a.connect();
     try {
       await a.query(`DROP DATABASE IF EXISTS ${database} WITH (FORCE)`);
-      await a.query(`DROP ROLE IF EXISTS ${role}`);
+      for (const r of [...extraRoles, role]) await a.query(`DROP ROLE IF EXISTS ${r}`);
     } finally {
       await a.end();
     }
@@ -140,6 +186,15 @@ export async function createFixture(version: number): Promise<Fixture> {
           note text
         )`);
       await c.query(`CREATE INDEX orders_customer_id_idx ON orders (customer_id)`);
+      await c.query(`CREATE INDEX customers_lower_email_idx ON customers (lower(email))`);
+      await c.query(`CREATE INDEX orders_closed_idx ON orders (customer_id) WHERE status = 'closed'`);
+      await c.query(`CREATE INDEX orders_status_incl_idx ON orders (status) INCLUDE (total)`);
+      await c.query(`
+        CREATE TABLE events (id bigint NOT NULL, created_on date NOT NULL, kind text NOT NULL)
+        PARTITION BY RANGE (created_on)`);
+      await c.query(`CREATE TABLE events_2025 PARTITION OF events FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')`);
+      await c.query(`CREATE TABLE events_2026 PARTITION OF events FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')`);
+      await c.query(`CREATE INDEX events_kind_idx ON events (kind)`);
       // Utility statements cannot take bind parameters, so this canary is also in pg_stat_statements.
       await c.query(`COMMENT ON COLUMN customers.full_name IS 'owner note ${canaries.column_comment}'`);
 
@@ -157,8 +212,17 @@ export async function createFixture(version: number): Promise<Fixture> {
          SELECT 1 + i % 5000, CASE WHEN i % 4 = 0 THEN 'shipped' ELSE 'pending' END, (i % 500) * 1.5
          FROM generate_series(1, 20000) AS i`
       );
+      await c.query(
+        `INSERT INTO events SELECT i, DATE '2025-06-01' + (i % 400), CASE WHEN i % 5 = 0 THEN 'signup' ELSE 'view' END
+         FROM generate_series(1, 4000) AS i`
+      );
+      await c.query(
+        `CREATE MATERIALIZED VIEW order_totals AS SELECT customer_id, sum(total) AS total FROM orders GROUP BY customer_id`
+      );
       await c.query(`ANALYZE customers`);
       await c.query(`ANALYZE orders`);
+      await c.query(`ANALYZE events`);
+      await c.query(`ANALYZE order_totals`);
 
       // Simple-protocol texts: the server sees the literals and comments exactly as written.
       const workload = [
@@ -171,6 +235,7 @@ export async function createFixture(version: number): Promise<Fixture> {
     } finally {
       await c.end();
     }
+    await waitForTableStats(connect);
   } catch (err) {
     await cleanup().catch(() => {});
     throw err;
@@ -190,8 +255,29 @@ export async function createFixture(version: number): Promise<Fixture> {
       PGDATABASE: database,
     },
     connect,
+    config,
+    createRole,
     cleanup,
   };
+}
+
+/** Cumulative stats reach other sessions asynchronously; wait until the fixture's inserts are visible. */
+async function waitForTableStats(connect: () => Promise<Client>): Promise<void> {
+  const c = await connect();
+  try {
+    for (let i = 0; i < 100; i++) {
+      const { rows } = await c.query(
+        `SELECT coalesce(sum(n_tup_ins) FILTER (WHERE relname = 'customers'), 0)::int AS customers,
+                coalesce(sum(n_tup_ins) FILTER (WHERE relname = 'orders'), 0)::int AS orders
+           FROM pg_stat_user_tables`
+      );
+      if (rows[0].customers >= 5000 && rows[0].orders >= 20000) return;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    throw new Error('fixture inserts never appeared in pg_stat_user_tables');
+  } finally {
+    await c.end();
+  }
 }
 
 /**

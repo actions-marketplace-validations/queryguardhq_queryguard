@@ -7,7 +7,7 @@ Phase 1 does not change severities, add plan analysis or load statistics into th
 
 ## Summary of decisions
 
-1. **The snapshot never takes a lock on a user table.** It reads catalogs and cumulative-stats views only, in one short `READ ONLY` transaction with `lock_timeout` and `statement_timeout` set. It computes sizes from `relpages × block_size`, **not** from `pg_relation_size`/`pg_total_relation_size`, because those take `AccessShareLock` on the table, its TOAST table and every index (verified in source, see [V4](#v4-do-the-size-functions-lock-the-relation)).
+1. **The snapshot never takes a lock on a user table.** It reads catalogs and cumulative-stats views only, in one short `READ ONLY` transaction with `lock_timeout` and `statement_timeout` set. It computes sizes from `relpages × block_size`, **not** from `pg_relation_size`/`pg_total_relation_size`, because those take `AccessShareLock` on the table, its TOAST table and every index (verified in source, see [V4](#v4-do-the-size-functions-lock-the-relation)). For the same reason it never deparses (`pg_get_indexdef`, `pg_get_expr`); index expression text comes from `schema.sql`.
 2. **`pg_dump --schema-only` is the one step that does lock user tables.** It takes `ACCESS SHARE` on every table it dumps, which needs `SELECT` on each table. We run it with `--lock-wait-timeout` and fail the whole run if it times out (see [pg_dump](#schemasql-and-pg_dump)).
 3. **Reading `pg_stats` needs per-column `SELECT`.** `pg_read_all_stats` does **not** grant it (verified in the docs, the view source and a live test, see [V1](#v1-who-can-see-rows-in-pg_stats-and-what-pg_read_all_stats-grants)). Together with (2), this means a plain snapshot role can read row data, even though QueryGuard never queries user tables. The grants recipe offers a `SECURITY DEFINER` shape function so `pg_stats` itself needs no table grants, and `--schema-from` removes the pg_dump grant too ([Decision 1](#decisions-2026-10-02)).
 4. **Query text is treated as hostile.** pg_stat_statements keeps comments inside the statement, and the docs say constants can survive normalization (see [V3](#v3-does-pg_stat_statements-query-text-keep-comments)). We strip comments, then **redact the whole text** whenever the tokenizer finds anything that looks like a literal or something it does not understand. A redacted query still contributes its counters.
@@ -58,6 +58,17 @@ Diffed from the column tables of each version's docs ([14 F.30](https://www.post
 * **Docs:** silent. The size functions table ([18 §9.28.7, Table 9.102](https://www.postgresql.org/docs/18/functions-admin.html#FUNCTIONS-ADMIN-DBSIZE)) does not mention locking.
 * **Source (`src/backend/utils/adt/dbsize.c`, `REL_14_STABLE` and `REL_18_STABLE`):** `pg_relation_size`, `pg_table_size`, `pg_indexes_size` and `pg_total_relation_size` all call `try_relation_open(relOid, AccessShareLock)`. The table and total variants also `relation_open(…, AccessShareLock)` the TOAST table, its index and every index.
 * **Why it matters:** `ACCESS SHARE` "conflicts with the ACCESS EXCLUSIVE lock mode only" ([18 §13.3.1](https://www.postgresql.org/docs/18/explicit-locking.html)). But a lock request queues behind a waiting `ACCESS EXCLUSIVE`, for example a migration's `ALTER TABLE`. A snapshot calling `pg_total_relation_size` at that moment would wait, or with `lock_timeout` fail on exactly the tables we care most about.
+* **Deparsing locks too (found by the item 2 lock test, then probed on 14, 16 and 18):** with another session holding `ACCESS EXCLUSIVE` on a table, these all waited until `lock_timeout`:
+  * `pg_get_indexdef(index, k, true)`, even for a plain column key;
+  * `pg_get_expr(pg_index.indexprs, indrelid)`.
+
+  These returned at once:
+  * `pg_class`, `pg_attribute` and `pg_stats` reads;
+  * `row_security_active()` and `has_column_privilege()`;
+  * `pg_stat_user_tables`/`pg_stat_user_indexes`;
+  * `format_type()` and `pg_get_constraintdef()`.
+
+  So the collectors call no deparse function on a user relation. A test lists the forbidden calls, and another test holds `ACCESS EXCLUSIVE` on fixture tables while collecting.
 * **Decision:** sizes are `relpages × current_setting('block_size')`, summed over the heap, its TOAST relation and the TOAST index, and each index (`pg_class.relpages` of each). `relpages` is an estimate maintained by VACUUM, ANALYZE and CREATE INDEX, so we label sizes "estimated from relpages" and record `last_analyze`/`last_autoanalyze`.
 
 ### V5. PG18 `pg_restore_relation_stats` / `pg_restore_attribute_stats`, and pg_dump 18 against older servers
@@ -139,30 +150,46 @@ queryguard snapshot inspect <dir>
 ```json
 {
   "block_size": 8192,
+  "size_source": "relpages",
+  "column_stats_source": "pg_stats",
   "stats_reset": { "database": "2026-09-01T00:00:00Z" },
   "relations": [
-    { "schema": "public", "name": "orders", "kind": "table",
+    { "schema": "public", "name": "orders", "kind": "table", "partition_of": null,
       "reltuples": 48000000, "relpages": 1200000, "relallvisible": 1100000,
-      "size_bytes": { "table": 9800000000, "indexes": 4100000000, "total": 14000000000, "source": "relpages" },
+      "size_bytes": { "table": 9800000000, "indexes": 4100000000, "total": 14000000000 },
       "activity": { "n_live_tup": 48000000, "n_dead_tup": 120000, "seq_scan": 12, "idx_scan": 980000000,
                     "n_tup_ins": 3100000, "n_tup_upd": 2200000, "n_tup_del": 0 },
       "last_analyze": "2026-10-01T03:12:00Z",
       "columns": [
-        { "name": "status", "attnum": 4, "inherited": false, "analyzed": true,
-          "null_frac": 0, "avg_width": 7, "n_distinct": 5, "correlation": 0.0412,
-          "mcv_freqs": [0.8123, 0.1201, 0.0402, 0.0201, 0.0073] }
+        { "name": "status", "attnum": 4,
+          "stats": [ { "inherited": false, "null_frac": 0, "avg_width": 7, "n_distinct": 5,
+                       "correlation": 0.0412, "mcv_freqs": [0.8123, 0.1201, 0.0402, 0.0201, 0.0073] } ] },
+        { "name": "email", "attnum": 2, "stats": [], "missing": "no_privilege" }
       ] }
   ],
   "indexes": [
-    { "schema": "public", "name": "orders_customer_id_idx", "table": "orders",
-      "columns": ["customer_id"], "expressions": [], "predicate": false,
-      "unique": false, "valid": true, "size_bytes": 1100000000, "idx_scan": 410000000 }
+    { "schema": "public", "name": "orders_customer_id_idx", "table_schema": "public", "table_name": "orders",
+      "kind": "index", "method": "btree", "unique": false, "primary": false, "valid": true, "partial": false,
+      "keys": [ { "column": "customer_id" } ], "include": [],
+      "size_bytes": 1100000000, "idx_scan": 410000000 },
+    { "schema": "public", "name": "orders_lower_ref_idx", "...": "...",
+      "keys": [ { "expression": "lower(ref)" } ] }
   ]
 }
 ```
 
-* **Kinds:** `table, partitioned_table, matview, index, partitioned_index`. TOAST size is folded into its table. System schemas (`pg_catalog`, `information_schema`, `pg_toast`, `pg_temp_*`) and temporary relations are excluded.
-* **Index columns and expressions** come from `pg_index` + `pg_get_indexdef(oid, k, true)` per key. The predicate is recorded as a boolean only, because a partial-index predicate can contain literals. The full definition is in `schema.sql` anyway.
+* **Relation kinds:** `table, partitioned_table, matview, foreign_table`; index kinds `index, partitioned_index`.
+  * A partition names its parent in `partition_of`.
+  * TOAST size is folded into its table.
+  * Excluded: system schemas (`pg_catalog`, `information_schema`, `pg_toast*`, `pg_temp_*`), temporary relations, and relations that belong to an extension (pg_dump leaves those out of `schema.sql` too).
+* **Column statistics:** `stats` holds one entry per `inherited` value present: a partitioned table has only the `inherited: true` row, and an inheritance parent can have both. An empty `stats` comes with `missing`:
+  * `no_privilege` (PARTIAL)
+  * `hidden_by_rls` (PARTIAL)
+  * `no_stats`: never analyzed, or statistics target 0. Not PARTIAL; it is a fact about the server.
+* **Index keys** come from `pg_index.indkey` joined to `pg_attribute`, which takes no lock.
+  * **Expression text is filled in from `schema.sql`.** Deparsing it on the server with `pg_get_indexdef` or `pg_get_expr(…, relid)` takes `AccessShareLock` on the table (V4), so the collector records `{ "expression": null }` and the writer completes it from the dump.
+  * The predicate is recorded as a boolean only, because a partial-index predicate can contain literals. The full definition is in `schema.sql`.
+* **`n_live_tup` and `n_dead_tup` are estimates.** For example, on 14–16 an ANALYZE in the same session as a bulk insert can count those rows twice. `reltuples` is the planner's figure and the one the Action reports.
 
 ### `workload.json` (abridged)
 
