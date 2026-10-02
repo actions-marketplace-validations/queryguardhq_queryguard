@@ -290,7 +290,7 @@ Counts and queryids only, never text. A reviewer can look up a redacted queryid 
 * Keys are sorted at every level; relations and indexes are in codepoint order (never the server's or the machine's collation); columns are in `attnum` order; statements are in numeric `queryid` order.
 * A test refreshes an unchanged database twice and requires every file to be byte-identical apart from `created_at`.
 
-**Validation:** `schema/snapshot.v1.json` (JSON Schema 2020-12) closes every object (`additionalProperties: false`). So a value column such as `most_common_vals` cannot appear in a valid snapshot, whatever a future bug does. Our own output is validated before it is written; a failure exits `1` and writes nothing. The loader validates again, and also checks every file against its SHA-256 in the manifest and rejects unlisted files.
+**Validation:** `schema/snapshot.v1.json` (JSON Schema 2020-12) closes every object (`additionalProperties: false`) except one map, `redactions.schema.removed_entries`, whose keys are pg_dump object types and whose values can only be integer counts. So a value column such as `most_common_vals` cannot appear in a valid snapshot, whatever a future bug does. Our own output is validated before it is written; a failure exits `1` and writes nothing. The loader validates again, and also checks every file against its SHA-256 in the manifest and rejects unlisted files.
 
 ## `schema.sql` and pg_dump
 

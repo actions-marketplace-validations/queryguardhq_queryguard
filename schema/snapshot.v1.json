@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/queryguardhq/queryguard/blob/main/schema/snapshot.v1.json",
   "title": "QueryGuard snapshot, format 1",
-  "description": "The JSON files of a .queryguard/snapshot directory, as one object keyed by file. Each file on its own validates against the matching $defs entry. Every object is closed (additionalProperties: false), so no field outside this schema, such as a statistics value column, can appear in a valid snapshot.",
+  "description": "The JSON files of a .queryguard/snapshot directory, as one object keyed by file. Each file on its own validates against the matching $defs entry. Every object is closed (additionalProperties: false) except one map, redactions.schema.removed_entries, whose keys are pg_dump object types and whose values are integer counts. So no field outside this schema, such as a statistics value column, can appear in a valid snapshot.",
   "type": "object",
   "required": ["manifest", "shape", "workload", "redactions"],
   "additionalProperties": false,

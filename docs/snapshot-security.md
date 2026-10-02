@@ -56,7 +56,7 @@ Every queryid whose text was replaced is listed in `redactions.json`.
 
 ### How it is enforced
 
-* **A closed schema.** [`schema/snapshot.v1.json`](../schema/snapshot.v1.json) rejects any field it does not define, so a value column cannot appear in a valid snapshot even through a future bug. QueryGuard validates its own output before writing anything, and validates again on every load.
+* **A strict schema.** [`schema/snapshot.v1.json`](../schema/snapshot.v1.json) rejects any field it does not define, so a value column cannot appear in a valid snapshot even through a future bug. Its one map, the removed-object counts in `redactions.json`, accepts any object type name but only an integer count. QueryGuard validates its own output before writing anything, and validates again on every load.
 * **Integrity.** Every file's SHA-256 is in `manifest.json`. A file edited after the snapshot was taken, an unlisted file, or a missing file makes the snapshot invalid. The Action then reports the run as INCONCLUSIVE instead of using it.
 * **Tests on PostgreSQL 14, 15, 16, 17 and 18** (`npm test`), described next.
 
