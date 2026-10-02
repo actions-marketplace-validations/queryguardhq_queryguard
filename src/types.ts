@@ -10,6 +10,8 @@ export interface Config {
   mockRows: number;
   failOnSev1: boolean;
   githubToken: string;
+  /** The migration runner wraps each file in a transaction (Rails, Django, ...). */
+  assumeInTransaction: boolean;
 }
 
 export interface PlanNode {
