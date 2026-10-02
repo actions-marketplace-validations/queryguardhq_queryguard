@@ -1,6 +1,8 @@
 import * as fs from 'fs';
 import { parseArgs } from 'util';
 import { Precision } from './format';
+import { renderInspect } from './inspect';
+import { loadSnapshot } from './load';
 import { takeSnapshot } from './run';
 import { SNAPSHOT_EXIT } from './types';
 import { DEFAULT_TOP } from './workload';
@@ -9,6 +11,7 @@ const USAGE = `
 USAGE:
   $ queryguard snapshot --label <name> [options]
   $ queryguard snapshot --label <name> --mode full --allow-columns <file> [options]
+  $ queryguard snapshot inspect [<dir>]     validate a snapshot and summarize it for review
 
   Read-only export of production's shape. Connects with the standard libpq environment
   (PGHOST, PGPORT, PGUSER, PGPASSWORD, PGDATABASE, PGSSLMODE); no connection detail is
@@ -55,7 +58,29 @@ const usageError = (message: string) => {
   return SNAPSHOT_EXIT.FAILED;
 };
 
+/** `snapshot inspect [<dir>]`: exit 0 valid and COMPLETE, 2 valid and PARTIAL, 1 invalid. */
+export function runInspect(argv: string[]): number {
+  let positionals: string[];
+  try {
+    ({ positionals } = parseArgs({ args: argv, options: {}, strict: true, allowPositionals: true }));
+  } catch (err: any) {
+    return usageError(err.message);
+  }
+  if (positionals.length > 1) return usageError('inspect takes one directory');
+  const dir = positionals[0] ?? '.queryguard/snapshot';
+  const loaded = loadSnapshot(dir);
+  if (!loaded.ok) {
+    console.error(`[QueryGuard] ${dir} is not a valid snapshot; do not use it:`);
+    for (const e of loaded.errors) console.error(`  - ${e}`);
+    return SNAPSHOT_EXIT.FAILED;
+  }
+  const m = loaded.snapshot.manifest;
+  process.stdout.write(renderInspect(loaded.snapshot, Object.keys(m.files).length + 1));
+  return m.status === 'COMPLETE' ? SNAPSHOT_EXIT.COMPLETE : SNAPSHOT_EXIT.PARTIAL;
+}
+
 export async function runSnapshot(argv: string[]): Promise<number> {
+  if (argv[0] === 'inspect') return runInspect(argv.slice(1));
   let values: {
     label?: string;
     out?: string;

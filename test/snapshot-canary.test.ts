@@ -85,6 +85,14 @@ for (const version of SNAPSHOT_VERSIONS) {
       assert.deepEqual(leaks, [], `leaked: ${leaks.map((l) => `${l.label} in ${l.file}: …${l.context}…`).join('\n')}`);
     });
 
+    test('inspect accepts the artifact, and its report carries no canary either', () => {
+      const r = runSnapshotCli(['inspect', out], {}, cwd);
+      assert.equal(r.exitCode, run.exitCode, r.stderr);
+      assert.match(r.stdout, /QueryGuard snapshot: canary-test/);
+      assert.match(r.stdout, /public\.customers/);
+      for (const [cls, canary] of Object.entries(fx.canaries)) assert.ok(!r.stdout.includes(canary), cls);
+    });
+
     test('no connection detail appears in the artifact', () => {
       const leaks = scanForNeedles(out, {
         database: fx.database,
