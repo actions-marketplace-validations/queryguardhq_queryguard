@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 jobs:
-  blast-radius-check:
+  queryguard:
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -38,9 +38,8 @@ jobs:
       - name: Install Dependencies
         run: npm ci
 
-      - name: Build TypeScript
-        run: npx tsc
-
+      # Runs the committed, bundled dist/ exactly as Action users do (the `dist` job in
+      # test.yml guarantees it matches the source).
       - name: Run QueryGuard Action
         run: |
           node dist/index.js \
