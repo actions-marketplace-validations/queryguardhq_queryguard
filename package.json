@@ -8,6 +8,7 @@
   },
   "files": [
     "dist",
+    "schema",
     "action.yml",
     "README.md",
     "LICENSE",
@@ -42,6 +43,7 @@
     "url": "https://github.com/queryguardhq/queryguard/issues"
   },
   "dependencies": {
+    "ajv": "8.20.0",
     "pg": "^8.11.3"
   },
   "devDependencies": {

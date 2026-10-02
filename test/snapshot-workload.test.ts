@@ -8,6 +8,7 @@ import { ClientConfig } from 'pg';
 import {
   Fixture,
   SNAPSHOT_VERSIONS,
+  assertPgDump,
   assertSnapshotServer,
   createBareDatabase,
   createFixture,
@@ -69,6 +70,7 @@ for (const version of SNAPSHOT_VERSIONS) {
 
     before(async () => {
       await assertSnapshotServer(version);
+      assertPgDump();
       fx = await createFixture(version);
       owner = await collect(fx.config());
     });

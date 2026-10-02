@@ -113,9 +113,14 @@ queryguard snapshot --label <name> [--out .queryguard/snapshot] [--mode shape|fu
                     [--precision approx|exact]         # default approx
                     [--pg-dump <path>]                 # default: first compatible pg_dump on PATH
                     [--schema-from <file>]             # use a schema-only dump made elsewhere (Decision 1)
-                    [--lock-timeout 1s] [--statement-timeout 10s] [--lock-wait-timeout 5s]
 queryguard snapshot inspect <dir>
 ```
+
+The limits are fixed rather than flags:
+* every session gets `lock_timeout 1s`, `statement_timeout 10s` and `idle_in_transaction_session_timeout 30s`;
+* pg_dump gets `--lock-wait-timeout` of 5 s and an overall cap of 10 minutes.
+
+A flag can be added if a real deployment needs one.
 
 * **Connection:** only from the standard libpq environment (`PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`/`.pgpass`, `PGDATABASE`, `PGSSLMODE`, and so on), passed unchanged to `pg_dump`. There is no connection flag, so no secret appears in shell history or `ps`.
 * **Required inputs:** `--label` (`[A-Za-z0-9._-]{1,64}`), so nothing in the artifact is derived from connection details.
@@ -127,8 +132,18 @@ queryguard snapshot inspect <dir>
   * A `SAVEPOINT` per relation batch: a failed batch is rolled back, recorded as PARTIAL, and the run continues.
 * **`--sample-window 5m`:**
   * Takes reading 1 in its own short transaction and **closes it**, waits, then takes reading 2. Holding a snapshot open for the whole window would pin the xmin horizon and hold back vacuum on production, so we never do that.
-  * Deltas are computed per `queryid`. An entry missing from either reading is reported in `workload.sampling.unmatched`, as is any change in `dealloc` between the readings.
+  * Deltas are computed per `queryid`. Entries missing from either reading are counted in `workload.sampling` (`new_entries`, `evicted_entries`), as is any `dealloc` during the window. A reset during the window makes the workload PARTIAL.
 * **Exit codes:** `0` COMPLETE, `2` PARTIAL (artifact written), `1` failure (nothing written). This mirrors PASS/INCONCLUSIVE.
+* **Order of work:**
+  1. Connect and check that the server is PostgreSQL 14 or newer.
+  2. Produce `schema.sql`: run pg_dump, or read `--schema-from`.
+  3. For a sampled window, take reading 1 and wait.
+  4. In one transaction, collect the shape and take the (second) workload reading.
+  5. Reconcile `schema.sql` with the catalog.
+  6. Format and validate against `schema/snapshot.v1.json`.
+  7. Write atomically.
+
+  Any failure before the write leaves the previous snapshot untouched.
 * **Never run:** `ANALYZE`, `VACUUM`, anything against a user table, or `pg_stat_*_reset`. A test asserts this by capturing every statement we send.
 
 ## Artifact layout
@@ -137,6 +152,7 @@ queryguard snapshot inspect <dir>
 .queryguard/snapshot/
   manifest.json     format_version, created_at, label, server_version_num, mode, precision,
                     status: COMPLETE | PARTIAL, partial_reasons[], tool_version,
+                    schema_source: { kind: pg_dump | file, pg_dump_version },
                     files: { name: sha256 }  (integrity, checked on load)
   schema.sql        pg_dump --schema-only (see below)
   shape.json        relations, indexes, columns, stats_reset times
@@ -179,6 +195,7 @@ queryguard snapshot inspect <dir>
 ```
 
 * **Relation kinds:** `table, partitioned_table, matview, foreign_table`; index kinds `index, partitioned_index`.
+  * Partitioned and foreign tables have no storage of their own: `size_bytes` is null, and so is `relpages` for a partitioned table, which Postgres reports as -1. The partitions carry the sizes.
   * A partition names its parent in `partition_of`.
   * TOAST size is folded into its table.
   * Excluded: system schemas (`pg_catalog`, `information_schema`, `pg_toast*`, `pg_temp_*`), temporary relations, and relations that belong to an extension (pg_dump leaves those out of `schema.sql` too).
@@ -240,7 +257,9 @@ A sampled window adds `"window": { "kind": "sampled", "seconds": 300 }` and `"sa
 }
 ```
 
-Counts and queryids only, never text. A reviewer can look up a redacted queryid in production's pg_stat_statements. `dealloc` is in `workload.json`'s `source`. Item 4 adds a `schema` section for what was removed from `schema.sql`.
+It also has a `schema` section: `removed_entries` (by pg_dump object type) and `removed_lines` (`owner`, `restrict`, `connect`) for what was taken out of `schema.sql`.
+
+Counts and queryids only, never text. A reviewer can look up a redacted queryid in production's pg_stat_statements. `dealloc` is in `workload.json`'s `source`.
 
 ## Privacy rules (shape mode)
 
@@ -260,7 +279,18 @@ Counts and queryids only, never text. A reviewer can look up a redacted queryid 
 
 **`schema.sql`** contains everything DDL contains: table, column and index names, enum labels, defaults, check constraints, view and function bodies. Function bodies can embed anything, including secrets. `schema.sql` is the file a reviewer must actually read (see [pg_dump](#schemasql-and-pg_dump)).
 
-**Rounding:** with `--precision approx` (the default), every row, page, byte and counter value is rounded to 2 significant figures. Fractions (`null_frac`, `correlation`, `mcv_freqs`) are fixed at 4 decimal places. `n_distinct` is rounded to 2 significant figures if positive and kept to 4 decimals if negative (it is then a ratio).
+**Rounding** (`src/snapshot/format.ts`):
+* **`--precision approx` (the default):** every measurement is rounded to 2 significant figures: rows, pages, bytes, counters, `calls`, execution times, `avg_width`, `dealloc`, and positive `n_distinct`.
+* **`exact`:** counts are integers and times have 3 decimals (µs).
+* **Both modes:** fractions (`null_frac`, `correlation`, `mcv_freqs`, and negative `n_distinct`, which is a ratio) have 4 decimal places.
+* **Never rounded:** identifiers and configuration (`attnum`, `block_size`, `server_version_num`) and metadata about our own processing (selection and redaction counts, window seconds).
+* Each figure is rounded on its own, so a rounded `total` need not equal rounded `table + indexes`.
+
+**Determinism:**
+* Keys are sorted at every level; relations and indexes are in codepoint order (never the server's or the machine's collation); columns are in `attnum` order; statements are in numeric `queryid` order.
+* A test refreshes an unchanged database twice and requires every file to be byte-identical apart from `created_at`.
+
+**Validation:** `schema/snapshot.v1.json` (JSON Schema 2020-12) closes every object (`additionalProperties: false`). So a value column such as `most_common_vals` cannot appear in a valid snapshot, whatever a future bug does. Our own output is validated before it is written; a failure exits `1` and writes nothing. The loader validates again, and also checks every file against its SHA-256 in the manifest and rejects unlisted files.
 
 ## `schema.sql` and pg_dump
 
@@ -269,11 +299,21 @@ Counts and queryids only, never text. A reviewer can look up a redacted queryid 
   * `--no-subscriptions` keeps `CONNECTION` strings out.
   * Role names leave through owners and grants, so we drop those too.
   * `--no-comments` is always passed ([Decision 4](#decisions-2026-10-02)).
-* **Post-processing:**
-  * Remove the `\restrict`/`\unrestrict` lines, so a refresh diff is stable and the dump's random key is not committed.
-  * Remove `CREATE SERVER … OPTIONS`, `CREATE USER MAPPING` and `-- Dumped from/by` header lines. Each removal is counted in `redactions.json`.
-  * Then normalize line endings.
-  * Reject anything that is not schema-only (`COPY`, `INSERT`, `pg_restore_*_stats`), and check the tables against the catalog. The same checks apply to a `--schema-from` file ([Decision 1](#decisions-2026-10-02)).
+* **Post-processing** (`src/snapshot/schema-sql.ts`) works on pg_dump's own object headers (`-- Name: x; Type: TABLE; Schema: public; Owner: -`), not on re-split SQL, so function bodies and `BEGIN ATOMIC` blocks cannot confuse it. The same processing applies to a `--schema-from` file ([Decision 1](#decisions-2026-10-02)).
+  * **Rejected:** any data object (`TABLE DATA`, `SEQUENCE SET`, large objects, `STATISTICS DATA`) or `COPY … FROM stdin`. Sequence values are data too; they reveal row counts.
+  * **Rejected:** a file without pg_dump's headers, or without `-- Dumped from database version`, or dumped from a different major version than the server.
+  * **Removed, counted by type in `redactions.json`:**
+    * `SERVER`, `USER MAPPING`, `SUBSCRIPTION` (connection strings and credentials);
+    * `COMMENT`, `SECURITY LABEL` (free text);
+    * `ACL`, `DEFAULT ACL` (role names);
+    * `PUBLICATION`;
+    * `DATABASE` (the database name).
+  * **Removed lines, counted:**
+    * `ALTER … OWNER TO …`, and owner names in object headers;
+    * `\restrict`/`\unrestrict`, so the dump's random key is never committed and refreshes diff cleanly;
+    * `\connect`.
+  * **Dropped as noise:** version, timestamp and `TOC entry` (OID) comment lines.
+  * **Reconciled:** tables, materialized views and foreign tables must match `shape.json` exactly, and every index expression must be found. Otherwise the snapshot is PARTIAL with the names.
 * **Locks:** pg_dump issues `LOCK TABLE … IN ACCESS SHARE MODE` for every table whose definition it dumps, even in schema-only mode (`DUMP_COMPONENTS_REQUIRING_LOCK` includes `DUMP_COMPONENT_DEFINITION` in `pg_dump.h`). [`LOCK`](https://www.postgresql.org/docs/18/sql-lock.html) in ACCESS SHARE mode needs `SELECT` on the table (or a stronger privilege). This is the one part of the run that can wait on a user-table lock, so `--lock-wait-timeout` is mandatory. A timeout fails the whole run, and the previous snapshot is kept.
 
 ## Full mode (`--mode full`, PG18 only)

@@ -4,9 +4,11 @@
 import { Client, ClientConfig } from 'pg';
 import { spawnSync } from 'child_process';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { randomBytes } from 'crypto';
 import { PG } from './harness';
+import { pgDumpVersion } from '../src/snapshot/pgdump';
 
 const ROOT = path.resolve(__dirname, '..');
 const hex = (bytes: number) => randomBytes(bytes).toString('hex');
@@ -220,10 +222,9 @@ export async function createFixture(version: number): Promise<Fixture> {
         `CREATE MATERIALIZED VIEW order_totals AS SELECT customer_id, sum(total) AS total FROM orders GROUP BY customer_id`
       );
       await c.query(`CREATE VIEW active_customers AS SELECT id, email FROM customers WHERE status = 'active'`);
-      await c.query(`ANALYZE customers`);
-      await c.query(`ANALYZE orders`);
+      // VACUUM as well, so autovacuum has no reason to change the tables while a test compares refreshes.
+      for (const t of ['customers', 'orders', 'events_2025', 'events_2026', 'order_totals']) await c.query(`VACUUM (ANALYZE) ${t}`);
       await c.query(`ANALYZE events`);
-      await c.query(`ANALYZE order_totals`);
 
       // Simple-protocol texts: the server sees the literals and comments exactly as written.
       const workload = [
@@ -358,14 +359,69 @@ export interface SnapshotRun {
   stderr: string;
 }
 
-/** Runs `queryguard snapshot <args>` from source with exactly `env` (plus PATH), nothing inherited. */
+/**
+ * Runs `queryguard snapshot <args>` from source with `env` and nothing else inherited, except
+ * what the pg_dump shim needs (HOME and DOCKER_* for the docker CLI). The test pg_dump comes
+ * first on PATH; `env.PATH` replaces PATH entirely.
+ */
 export function runSnapshotCli(args: readonly string[], env: Record<string, string>, cwd: string): SnapshotRun {
+  const passThrough = Object.fromEntries(
+    Object.entries(process.env).filter(([k]) => k === 'HOME' || k.startsWith('DOCKER_')) as [string, string][]
+  );
   const res = spawnSync(
     process.execPath,
     [path.join(ROOT, 'node_modules/tsx/dist/cli.mjs'), path.join(ROOT, 'src/index.ts'), 'snapshot', ...args],
-    { cwd, env: { PATH: process.env.PATH, ...env }, encoding: 'utf8' }
+    { cwd, env: { ...passThrough, PATH: `${pgDumpDir()}${path.delimiter}${process.env.PATH}`, ...env }, encoding: 'utf8' }
   );
   return { exitCode: res.status, stdout: res.stdout, stderr: res.stderr };
+}
+
+/**
+ * The test pg_dump (Decision 7 in docs/design/snapshot.md): the real pg_dump 18 inside the PG18
+ * test container, reached through docker compose. Each matrix server's host port (54NN) is mapped
+ * to its compose service (pgNN), which is how the PG18 container reaches it.
+ */
+const PG_DUMP_SHIM = `#!/bin/sh
+case "$PGPORT" in
+  541[4-8]) host="pg\${PGPORT#54}" ;;
+  *) host="$PGHOST" ;;
+esac
+exec docker compose -f "${path.join(ROOT, 'docker-compose.test.yml')}" exec -T \
+  -e PGHOST="$host" -e PGPORT=5432 -e PGUSER="$PGUSER" -e PGPASSWORD="$PGPASSWORD" \
+  -e PGDATABASE="$PGDATABASE" -e PGOPTIONS="$PGOPTIONS" -e PGAPPNAME="$PGAPPNAME" \
+  pg18 pg_dump "$@"
+`;
+
+let shimDir: string | undefined;
+
+/** A directory whose `pg_dump` is QG_TEST_PG_DUMP if set, otherwise the container shim. */
+export function pgDumpDir(): string {
+  if (shimDir) return shimDir;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qg-pgdump-'));
+  const target = path.join(dir, 'pg_dump');
+  if (process.env.QG_TEST_PG_DUMP) fs.symlinkSync(path.resolve(process.env.QG_TEST_PG_DUMP), target);
+  else fs.writeFileSync(target, PG_DUMP_SHIM, { mode: 0o755 });
+  process.on('exit', () => fs.rmSync(dir, { recursive: true, force: true }));
+  return (shimDir = dir);
+}
+
+/** Fails loudly (never skips) without a pg_dump new enough for every server in the matrix. */
+export function assertPgDump(): void {
+  const v = pgDumpVersion(path.join(pgDumpDir(), 'pg_dump'));
+  const newest = Math.max(...SNAPSHOT_VERSIONS);
+  if (!v || v.major < newest) {
+    throw new Error(
+      `The snapshot tests need pg_dump ${newest} or newer, got ${v ? v.version : 'none'}. ` +
+        'Run `npm run test:db:up` (the tests use pg_dump from the PG18 container), or set QG_TEST_PG_DUMP=/path/to/pg_dump.'
+    );
+  }
+}
+
+/** Runs the test pg_dump directly, e.g. to make a --schema-from file. */
+export function runTestPgDump(args: readonly string[], env: Record<string, string>): string {
+  const res = spawnSync(path.join(pgDumpDir(), 'pg_dump'), args, { env: { ...process.env, ...env }, encoding: 'utf8', maxBuffer: 1 << 28 });
+  if (res.status !== 0) throw new Error(`pg_dump failed: ${res.stderr}`);
+  return res.stdout;
 }
 
 /** A database on a matrix server with no extension and no tables, as an owner superuser. */

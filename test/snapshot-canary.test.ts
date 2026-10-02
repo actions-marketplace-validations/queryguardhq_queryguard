@@ -10,6 +10,7 @@ import {
   Fixture,
   SNAPSHOT_VERSIONS,
   SnapshotRun,
+  assertPgDump,
   assertSnapshotServer,
   canaryExposure,
   createFixture,
@@ -49,6 +50,7 @@ for (const version of SNAPSHOT_VERSIONS) {
 
     before(async () => {
       await assertSnapshotServer(version);
+      assertPgDump();
       fx = await createFixture(version);
       cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'qg-snap-'));
       out = path.join(cwd, '.queryguard', 'snapshot');

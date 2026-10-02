@@ -1,0 +1,389 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/queryguardhq/queryguard/blob/main/schema/snapshot.v1.json",
+  "title": "QueryGuard snapshot, format 1",
+  "description": "The JSON files of a .queryguard/snapshot directory, as one object keyed by file. Each file on its own validates against the matching $defs entry. Every object is closed (additionalProperties: false), so no field outside this schema, such as a statistics value column, can appear in a valid snapshot.",
+  "type": "object",
+  "required": ["manifest", "shape", "workload", "redactions"],
+  "additionalProperties": false,
+  "properties": {
+    "manifest": { "$ref": "#/$defs/manifest" },
+    "shape": { "$ref": "#/$defs/shape" },
+    "workload": { "$ref": "#/$defs/workload" },
+    "redactions": { "$ref": "#/$defs/redactions" }
+  },
+  "$defs": {
+    "timestamp": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$" },
+    "nullableTimestamp": { "oneOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
+    "count": { "type": "number", "minimum": 0 },
+    "nullableCount": { "oneOf": [{ "$ref": "#/$defs/count" }, { "type": "null" }] },
+    "fraction": { "type": "number", "minimum": -1, "maximum": 1 },
+    "name": { "type": "string", "minLength": 1 },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "queryid": { "type": "string", "pattern": "^-?[0-9]+$" },
+
+    "manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "format_version", "created_at", "label", "server_version_num", "mode", "precision", "status",
+        "partial_reasons", "tool_version", "schema_source", "files"
+      ],
+      "properties": {
+        "format_version": { "const": 1 },
+        "created_at": { "$ref": "#/$defs/timestamp" },
+        "label": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$" },
+        "server_version_num": { "type": "integer", "minimum": 140000 },
+        "mode": { "enum": ["shape", "full"] },
+        "precision": { "enum": ["approx", "exact"] },
+        "status": { "enum": ["COMPLETE", "PARTIAL"] },
+        "partial_reasons": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["scope", "reason"],
+            "properties": { "scope": { "$ref": "#/$defs/name" }, "reason": { "$ref": "#/$defs/name" } }
+          }
+        },
+        "tool_version": { "$ref": "#/$defs/name" },
+        "schema_source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "pg_dump_version"],
+          "properties": {
+            "kind": { "enum": ["pg_dump", "file"] },
+            "pg_dump_version": { "oneOf": [{ "$ref": "#/$defs/name" }, { "type": "null" }] }
+          }
+        },
+        "files": {
+          "description": "SHA-256 of every other file in the directory.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema.sql", "shape.json", "workload.json", "redactions.json"],
+          "properties": {
+            "schema.sql": { "$ref": "#/$defs/sha256" },
+            "shape.json": { "$ref": "#/$defs/sha256" },
+            "workload.json": { "$ref": "#/$defs/sha256" },
+            "redactions.json": { "$ref": "#/$defs/sha256" },
+            "stats.sql": { "$ref": "#/$defs/sha256" }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "COMPLETE" } } },
+          "then": { "properties": { "partial_reasons": { "type": "array", "maxItems": 0 } } },
+          "else": { "properties": { "partial_reasons": { "type": "array", "minItems": 1 } } }
+        }
+      ]
+    },
+
+    "columnStats": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inherited", "null_frac", "avg_width", "n_distinct", "correlation", "mcv_freqs"],
+      "properties": {
+        "inherited": { "type": "boolean" },
+        "null_frac": { "type": "number", "minimum": 0, "maximum": 1 },
+        "avg_width": { "$ref": "#/$defs/count" },
+        "n_distinct": { "type": "number", "minimum": -1 },
+        "correlation": { "oneOf": [{ "$ref": "#/$defs/fraction" }, { "type": "null" }] },
+        "mcv_freqs": {
+          "oneOf": [{ "type": "array", "items": { "type": "number", "minimum": 0, "maximum": 1 } }, { "type": "null" }]
+        }
+      }
+    },
+    "column": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "attnum", "stats"],
+      "properties": {
+        "name": { "$ref": "#/$defs/name" },
+        "attnum": { "type": "integer", "minimum": 1 },
+        "stats": { "type": "array", "items": { "$ref": "#/$defs/columnStats" }, "maxItems": 2 },
+        "missing": { "enum": ["no_privilege", "hidden_by_rls", "no_stats"] }
+      }
+    },
+    "relation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "name", "kind", "partition_of", "reltuples", "relpages", "relallvisible", "size_bytes",
+        "activity", "last_analyze", "columns"
+      ],
+      "properties": {
+        "schema": { "$ref": "#/$defs/name" },
+        "name": { "$ref": "#/$defs/name" },
+        "kind": { "enum": ["table", "partitioned_table", "matview", "foreign_table"] },
+        "partition_of": { "oneOf": [{ "$ref": "#/$defs/name" }, { "type": "null" }] },
+        "reltuples": { "$ref": "#/$defs/nullableCount" },
+        "relpages": { "$ref": "#/$defs/nullableCount" },
+        "relallvisible": { "$ref": "#/$defs/count" },
+        "size_bytes": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["table", "indexes", "total"],
+              "properties": {
+                "table": { "$ref": "#/$defs/count" },
+                "indexes": { "$ref": "#/$defs/count" },
+                "total": { "$ref": "#/$defs/count" }
+              }
+            },
+            { "type": "null" }
+          ]
+        },
+        "activity": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["n_live_tup", "n_dead_tup", "seq_scan", "idx_scan", "n_tup_ins", "n_tup_upd", "n_tup_del"],
+              "properties": {
+                "n_live_tup": { "$ref": "#/$defs/count" },
+                "n_dead_tup": { "$ref": "#/$defs/count" },
+                "seq_scan": { "$ref": "#/$defs/count" },
+                "idx_scan": { "$ref": "#/$defs/nullableCount" },
+                "n_tup_ins": { "$ref": "#/$defs/count" },
+                "n_tup_upd": { "$ref": "#/$defs/count" },
+                "n_tup_del": { "$ref": "#/$defs/count" }
+              }
+            },
+            { "type": "null" }
+          ]
+        },
+        "last_analyze": { "$ref": "#/$defs/nullableTimestamp" },
+        "columns": { "type": "array", "items": { "$ref": "#/$defs/column" } },
+        "error": { "$ref": "#/$defs/name" }
+      }
+    },
+    "index": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "name", "table_schema", "table_name", "kind", "method", "unique", "primary", "valid", "partial",
+        "keys", "include", "size_bytes", "idx_scan"
+      ],
+      "properties": {
+        "schema": { "$ref": "#/$defs/name" },
+        "name": { "$ref": "#/$defs/name" },
+        "table_schema": { "$ref": "#/$defs/name" },
+        "table_name": { "$ref": "#/$defs/name" },
+        "kind": { "enum": ["index", "partitioned_index"] },
+        "method": { "$ref": "#/$defs/name" },
+        "unique": { "type": "boolean" },
+        "primary": { "type": "boolean" },
+        "valid": { "type": "boolean" },
+        "partial": { "type": "boolean" },
+        "keys": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["column"],
+                "properties": { "column": { "$ref": "#/$defs/name" } }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["expression"],
+                "properties": { "expression": { "oneOf": [{ "$ref": "#/$defs/name" }, { "type": "null" }] } }
+              }
+            ]
+          }
+        },
+        "include": { "type": "array", "items": { "$ref": "#/$defs/name" } },
+        "size_bytes": { "$ref": "#/$defs/count" },
+        "idx_scan": { "$ref": "#/$defs/nullableCount" }
+      }
+    },
+    "shape": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["block_size", "size_source", "column_stats_source", "stats_reset", "relations", "indexes"],
+      "properties": {
+        "block_size": { "type": "integer", "minimum": 1024 },
+        "size_source": { "const": "relpages" },
+        "column_stats_source": { "enum": ["pg_stats", "queryguard.column_shape"] },
+        "stats_reset": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["database"],
+          "properties": { "database": { "$ref": "#/$defs/nullableTimestamp" } }
+        },
+        "relations": { "type": "array", "items": { "$ref": "#/$defs/relation" } },
+        "indexes": { "type": "array", "items": { "$ref": "#/$defs/index" } }
+      }
+    },
+
+    "statement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "queryid", "kind", "text", "redaction", "calls", "total_exec_ms", "mean_exec_ms", "rows", "shared_blks_hit",
+        "shared_blks_read", "relations", "unresolved", "unresolved_count", "selected_by"
+      ],
+      "properties": {
+        "queryid": { "$ref": "#/$defs/queryid" },
+        "kind": { "enum": ["SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "UNKNOWN"] },
+        "text": { "$ref": "#/$defs/name" },
+        "redaction": { "enum": ["literal", "unparseable", null] },
+        "calls": { "$ref": "#/$defs/count" },
+        "total_exec_ms": { "$ref": "#/$defs/count" },
+        "mean_exec_ms": { "$ref": "#/$defs/count" },
+        "rows": { "$ref": "#/$defs/count" },
+        "shared_blks_hit": { "$ref": "#/$defs/count" },
+        "shared_blks_read": { "$ref": "#/$defs/count" },
+        "relations": { "type": "array", "items": { "$ref": "#/$defs/name" }, "uniqueItems": true },
+        "unresolved": { "type": "array", "items": { "$ref": "#/$defs/name" }, "uniqueItems": true },
+        "unresolved_count": { "type": "integer", "minimum": 0 },
+        "selected_by": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "enum": ["total_time", "calls"] }
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "redaction": { "const": "literal" } } },
+          "then": { "properties": { "text": { "const": "[redacted: literal]" }, "unresolved": { "type": "array", "maxItems": 0 } } }
+        },
+        {
+          "if": { "properties": { "redaction": { "const": "unparseable" } } },
+          "then": {
+            "properties": {
+              "text": { "const": "[redacted: unparseable]" },
+              "kind": { "const": "UNKNOWN" },
+              "relations": { "type": "array", "maxItems": 0 },
+              "unresolved": { "type": "array", "maxItems": 0 }
+            }
+          }
+        }
+      ]
+    },
+    "workload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "selection", "statements"],
+      "properties": {
+        "source": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["extension_version", "stats_reset", "dealloc", "window"],
+              "properties": {
+                "extension_version": { "$ref": "#/$defs/name" },
+                "stats_reset": { "$ref": "#/$defs/nullableTimestamp" },
+                "dealloc": { "$ref": "#/$defs/count" },
+                "window": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["kind"],
+                      "properties": { "kind": { "const": "since_reset" } }
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["kind", "seconds"],
+                      "properties": { "kind": { "const": "sampled" }, "seconds": { "type": "number", "exclusiveMinimum": 0 } }
+                    }
+                  ]
+                }
+              }
+            },
+            { "type": "null" }
+          ]
+        },
+        "selection": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["top", "candidates", "selected"],
+          "properties": {
+            "top": { "type": "integer", "minimum": 1 },
+            "candidates": { "type": "integer", "minimum": 0 },
+            "selected": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "sampling": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["new_entries", "evicted_entries", "dealloc_during_window"],
+          "properties": {
+            "new_entries": { "type": "integer", "minimum": 0 },
+            "evicted_entries": { "type": "integer", "minimum": 0 },
+            "dealloc_during_window": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "statements": { "type": "array", "items": { "$ref": "#/$defs/statement" } }
+      }
+    },
+
+    "redactions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "workload"],
+      "properties": {
+        "schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["removed_entries", "removed_lines"],
+          "properties": {
+            "removed_entries": {
+              "description": "Objects removed from schema.sql, by pg_dump object type.",
+              "type": "object",
+              "additionalProperties": { "type": "integer", "minimum": 1 }
+            },
+            "removed_lines": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["owner", "restrict", "connect"],
+              "properties": {
+                "owner": { "type": "integer", "minimum": 0 },
+                "restrict": { "type": "integer", "minimum": 0 },
+                "connect": { "type": "integer", "minimum": 0 }
+              }
+            }
+          }
+        },
+        "workload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["entries_read", "excluded", "comments_removed", "redacted"],
+          "properties": {
+            "entries_read": { "type": "integer", "minimum": 0 },
+            "excluded": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["not_dml", "text_hidden", "system_only", "no_relations"],
+              "properties": {
+                "not_dml": { "type": "integer", "minimum": 0 },
+                "text_hidden": { "type": "integer", "minimum": 0 },
+                "system_only": { "type": "integer", "minimum": 0 },
+                "no_relations": { "type": "integer", "minimum": 0 }
+              }
+            },
+            "comments_removed": { "type": "integer", "minimum": 0 },
+            "redacted": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["literal", "unparseable"],
+              "properties": {
+                "literal": { "type": "array", "items": { "$ref": "#/$defs/queryid" }, "uniqueItems": true },
+                "unparseable": { "type": "array", "items": { "$ref": "#/$defs/queryid" }, "uniqueItems": true }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

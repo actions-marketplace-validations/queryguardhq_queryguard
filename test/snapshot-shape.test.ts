@@ -80,9 +80,9 @@ for (const version of SNAPSHOT_VERSIONS) {
       assert.equal(customers.kind, 'table');
       assert.equal(customers.partition_of, null);
       assert.equal(customers.reltuples, 5000);
-      assert.ok(customers.relpages > 0);
+      assert.ok(customers.relpages! > 0);
       const s = customers.size_bytes!;
-      assert.ok(s.table >= customers.relpages * owner.shape.block_size, 'heap size covers relpages');
+      assert.ok(s.table >= customers.relpages! * owner.shape.block_size, 'heap size covers relpages');
       const indexSum = owner.shape.indexes
         .filter((i) => i.table_name === 'customers')
         .reduce((n, i) => n + i.size_bytes, 0);
@@ -90,6 +90,9 @@ for (const version of SNAPSHOT_VERSIONS) {
       assert.equal(s.total, s.table + s.indexes);
 
       assert.equal(rel(owner, 'events').kind, 'partitioned_table');
+      assert.equal(rel(owner, 'events').size_bytes, null, 'no storage of its own');
+      assert.equal(rel(owner, 'events').relpages, null, 'Postgres reports -1');
+      assert.ok(rel(owner, 'events_2025').size_bytes!.total > 0);
       assert.equal(rel(owner, 'events_2025').partition_of, 'public.events');
       assert.equal(rel(owner, 'order_totals').kind, 'matview');
       assert.equal(owner.shape.size_source, 'relpages');

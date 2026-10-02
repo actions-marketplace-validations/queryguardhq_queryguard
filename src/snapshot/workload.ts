@@ -2,6 +2,7 @@ import { quoteIdent } from '../ident';
 import { code, hasLiteral, lex, rebuild, statementKind, StatementKind, Token } from './lexer';
 import { relationRefs, Resolved } from './relations';
 import { Queryable, withSavepoint } from './session';
+import { byCodepoint } from './writer';
 import { PartialReason, Redactions, Workload, WorkloadKind, WorkloadStatement, WorkloadWindow } from './types';
 
 export const DEFAULT_TOP = 200;
@@ -141,7 +142,7 @@ function groupByQueryid(entries: Entry[]): Map<string, Group> {
     g.entries.push(e);
     groups.set(e.queryid, g);
   }
-  for (const g of groups.values()) g.entries.sort((a, b) => b.calls - a.calls || a.query.localeCompare(b.query));
+  for (const g of groups.values()) g.entries.sort((a, b) => b.calls - a.calls || byCodepoint(a.query, b.query));
   return groups;
 }
 
@@ -160,7 +161,7 @@ export interface BuildOptions {
 
 export interface WorkloadResult {
   workload: Workload;
-  redactions: Redactions;
+  redactions: Pick<Redactions, 'workload'>;
   partial: PartialReason[];
 }
 

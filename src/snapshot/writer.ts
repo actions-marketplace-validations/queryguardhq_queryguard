@@ -5,6 +5,9 @@ import * as path from 'path';
 export const ARTIFACT_FILES = ['manifest.json', 'schema.sql', 'shape.json', 'workload.json', 'redactions.json', 'stats.sql'] as const;
 export type ArtifactFile = (typeof ARTIFACT_FILES)[number];
 
+/** Codepoint order: the same on every machine and server, unlike locale collation. */
+export const byCodepoint = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+
 /** JSON with object keys sorted at every level, 2-space indent and a final newline, so refreshes diff cleanly. */
 export function stableStringify(value: unknown): string {
   const sortKeys = (v: unknown): unknown => {
@@ -12,7 +15,7 @@ export function stableStringify(value: unknown): string {
     if (v && typeof v === 'object') {
       return Object.fromEntries(
         Object.keys(v as object)
-          .sort()
+          .sort(byCodepoint)
           .map((k) => [k, sortKeys((v as Record<string, unknown>)[k])])
       );
     }

@@ -1,5 +1,6 @@
 import { quoteIdent } from '../ident';
 import { Queryable, withSavepoint } from './session';
+import { byCodepoint } from './writer';
 import {
   Activity,
   ColumnShape,
@@ -42,7 +43,7 @@ SELECT c.oid::int8 AS oid, n.nspname AS schema, c.relname AS name, c.relkind::te
    AND NOT EXISTS (
      SELECT 1 FROM pg_catalog.pg_depend d
       WHERE d.classid = 'pg_catalog.pg_class'::pg_catalog.regclass AND d.objid = c.oid AND d.deptype = 'e')
- ORDER BY n.nspname, c.relname`;
+ ORDER BY n.nspname COLLATE "C", c.relname COLLATE "C"`;
 
 /** Relations that belong to an extension (e.g. the pg_stat_statements view): not snapshot relations, not reported. */
 const EXTENSION_RELATIONS_SQL = `
@@ -145,6 +146,9 @@ export async function collectShape(db: Queryable, serverVersionNum: number): Pro
     const heap = (num(r.relpages) + num(r.toast_pages)) * blockSize;
     const indexes = num(r.index_pages) * blockSize;
     const reltuples = num(r.reltuples);
+    const relpages = num(r.relpages);
+    // Partitioned and foreign tables have no storage of their own (a partitioned table reports
+    // relpages -1); their partitions carry the sizes.
     return {
       oid: String(r.oid),
       schema: r.schema,
@@ -156,9 +160,9 @@ export async function collectShape(db: Queryable, serverVersionNum: number): Pro
         kind,
         partition_of: r.parent_name ? displayName(r.parent_schema, r.parent_name) : null,
         reltuples: reltuples < 0 ? null : reltuples,
-        relpages: num(r.relpages),
-        relallvisible: num(r.relallvisible),
-        size_bytes: kind === 'foreign_table' ? null : { table: heap, indexes, total: heap + indexes },
+        relpages: relpages < 0 ? null : relpages,
+        relallvisible: Math.max(0, num(r.relallvisible)),
+        size_bytes: kind === 'table' || kind === 'matview' ? { table: heap, indexes, total: heap + indexes } : null,
         activity: null,
         last_analyze: null,
         columns: [],
@@ -206,7 +210,8 @@ export async function collectShape(db: Queryable, serverVersionNum: number): Pro
     });
   }
 
-  indexes.sort((a, b) => a.schema.localeCompare(b.schema) || a.name.localeCompare(b.name));
+  indexes.sort((a, b) => byCodepoint(a.schema, b.schema) || byCodepoint(a.name, b.name));
+  relations.sort((a, b) => byCodepoint(a.schema, b.schema) || byCodepoint(a.name, b.name));
   const extensionRelations = (await db.query(EXTENSION_RELATIONS_SQL)).rows.map((r) => ({ schema: r.schema, name: r.name }));
   return {
     extensionRelations,

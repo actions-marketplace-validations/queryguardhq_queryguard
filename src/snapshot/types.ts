@@ -15,9 +15,14 @@ export interface Manifest {
   label: string;
   server_version_num: number;
   mode: 'shape' | 'full';
+  precision: 'approx' | 'exact';
   status: SnapshotStatus;
   partial_reasons: PartialReason[];
   tool_version: string;
+  /** Where schema.sql came from: pg_dump run by this command, or a file given with --schema-from. */
+  schema_source: { kind: 'pg_dump' | 'file'; pg_dump_version: string | null };
+  /** SHA-256 of every other file in the snapshot directory. */
+  files: Record<string, string>;
 }
 
 export type RelationKind = 'table' | 'partitioned_table' | 'matview' | 'foreign_table';
@@ -67,9 +72,10 @@ export interface RelationShape {
   partition_of: string | null;
   /** Null when Postgres has no estimate yet (never vacuumed or analyzed). */
   reltuples: number | null;
-  relpages: number;
+  /** Null when Postgres reports none (a partitioned table reports -1). */
+  relpages: number | null;
   relallvisible: number;
-  /** relpages × block_size; the heap includes TOAST. Null for foreign tables, which have no storage. */
+  /** relpages × block_size; the heap includes TOAST. Null for partitioned and foreign tables, which have no storage. */
   size_bytes: { table: number; indexes: number; total: number } | null;
   activity: Activity | null;
   last_analyze: string | null;
@@ -162,6 +168,12 @@ export interface Workload {
 
 /** What was withheld from the artifact, and why. Counts and queryids only, never content. */
 export interface Redactions {
+  schema: {
+    /** Objects removed from schema.sql, by pg_dump object type (servers, user mappings, comments, ACLs...). */
+    removed_entries: Record<string, number>;
+    /** Lines removed inside kept objects; `owner` also counts owner names blanked in object headers. */
+    removed_lines: { owner: number; restrict: number; connect: number };
+  };
   workload: {
     /** pg_stat_statements entries (per role) read for this database. */
     entries_read: number;
