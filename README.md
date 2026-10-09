@@ -311,3 +311,7 @@ What the PR check does with it:
 ## 📄 License
 
 QueryGuard is open-source software licensed under the [MIT License](LICENSE).
+
+---
+
+*Built with Claude Code*
